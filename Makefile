@@ -1,4 +1,4 @@
-CFLAGS=-std=c99 -Wall -Wextra -O2 -g -D_POSIX_SOURCE
+CFLAGS=-std=c99 -Wall -Wextra -O2 -g -D_POSIX_SOURCE -D_POSIX_C_SOURCE=200809L
 LDFLAGS=
 
 SRCS=\
