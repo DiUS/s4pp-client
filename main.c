@@ -48,6 +48,8 @@ static struct
 } inbuf;
 
 static bool verbose;
+static int commit_interval;
+static time_t next_commit;
 
 
 static void on_quit (int sig)
@@ -59,7 +61,16 @@ static void on_quit (int sig)
 
 static int get_poll_timeout (void)
 {
-  return -1; // TODO
+  time_t now = time (NULL);
+  if (commit_interval > 0)
+  {
+    if (now >= next_commit)
+        return 0;
+     else
+       return (next_commit - now) * 1000;
+  }
+  else
+      return -1;
 }
 
 
@@ -104,9 +115,20 @@ static char *get_line (void)
 }
 
 
+static void on_checkpoint (s4pp_ctx_t *ctx, bool success)
+{
+  (void)ctx;
+  fprintf(stderr, "checkpoint: %d\n", success);
+}
+
 static void handle_poll_timeout (void)
 {
-  // TODO
+  if (commit_interval > 0)
+  {
+    next_commit = time (NULL) + commit_interval;
+    fprintf(stderr,"checkpoint, flushing...\n");
+    s4pp_flush (ctx, on_checkpoint);
+  }
 }
 
 
@@ -209,7 +231,7 @@ static bool do_send (s4pp_conn_t *conn, const char *data, uint16_t len)
         {
           io.pollfd[POLLFD_SOCK].revents = 0;
           io.pollfd[POLLFD_SAMPLES].revents = 0;
-          ret = poll (io.pollfd, POLLFD_MAX, get_poll_timeout ());
+          ret = poll (io.pollfd, POLLFD_MAX, -1);
           if (ret < 0)
           {
             if (ret == EINTR)
@@ -230,8 +252,6 @@ static bool do_send (s4pp_conn_t *conn, const char *data, uint16_t len)
             if (io.pollfd[POLLFD_SOCK].revents)
               handle_sock_input ();
           }
-          else
-            handle_poll_timeout ();
         }
         io.pollfd[POLLFD_SOCK].events &= ~POLLOUT;
       }
@@ -268,7 +288,7 @@ get_a_line:
       }
     }
     if (ret == 0)
-      handle_poll_timeout ();
+      return false;
     if (io.pollfd[POLLFD_SAMPLES].revents)
       handle_sample_input ();
     if (io.pollfd[POLLFD_SOCK].revents)
@@ -325,7 +345,7 @@ int main (int argc, char *argv[])
   s4pp_server_t server = { 0, "22226" };
 
   int opt;
-  while ((opt = getopt (argc, argv, "u:k:s:p:vh")) != -1)
+  while ((opt = getopt (argc, argv, "u:k:s:p:i:vh")) != -1)
   {
     switch (opt)
     {
@@ -340,6 +360,10 @@ int main (int argc, char *argv[])
       }
       case 's': server.hostname = optarg; break;
       case 'p': server.port = optarg; break;
+      case 'i':
+        commit_interval = atoi (optarg);
+        next_commit = time(NULL) + commit_interval;
+        break;
       case 'v': verbose = true; break;
       default:
         verbose = true;

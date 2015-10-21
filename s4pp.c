@@ -217,20 +217,25 @@ static bool process_out_buffer (s4pp_ctx_t *ctx, bool flush)
       !ctx->outbuf.overflow_used &&
       !flush)
     return true;
-  if (!ctx->io->send (ctx->conn, ctx->outbuf.bytes, ctx->outbuf.used))
+
+  // Swap outbuf & overflow, *before* we get on_sent callback
+  uint16_t len = ctx->outbuf.len;
+  char *data = ctx->outbuf.bytes;
+  ctx->outbuf.bytes = ctx->outbuf.overflow;
+  ctx->outbuf.used = ctx->outbuf.overflow_used;
+  ctx->outbuf.overflow = data;
+  ctx->outbuf.overflow_used = 0;
+  ctx->waiting_for_sent = true;
+
+  if (!ctx->io->send (ctx->conn, data, len))
   {
+    ctx->waiting_for_sent = false;
     ctx->state = S4PP_ERRORED;
     ctx->err = S4PP_NETWORK_ERROR;
     ctx->io->disconnect (ctx->conn);
     ctx->conn = NULL;
     invoke_done (ctx, false);
   }
-  ctx->waiting_for_sent = true;
-  char *tmp = ctx->outbuf.bytes;
-  ctx->outbuf.bytes = ctx->outbuf.overflow;
-  ctx->outbuf.used = ctx->outbuf.overflow_used;
-  ctx->outbuf.overflow = tmp;
-  ctx->outbuf.overflow_used = 0;
   return false;
 }
 
