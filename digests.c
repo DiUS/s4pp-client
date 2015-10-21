@@ -82,8 +82,8 @@ void crypto_encode_asciihex (const char *bin, size_t binlen, char *outbuf)
   int i;
   for (i = binlen -1; i >= 0; --i)
   {
-    outbuf[aidx--] = crypto_hexbytes[bin[i] & 0xf];
-    outbuf[aidx--] = crypto_hexbytes[bin[i] >>  4];
+    outbuf[aidx--] = crypto_hexbytes[(bin[i]     ) & 0xf];
+    outbuf[aidx--] = crypto_hexbytes[(bin[i] >> 4) & 0xf];
   }
 }
 

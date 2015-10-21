@@ -148,7 +148,6 @@ static void clear_dict (s4pp_ctx_t *ctx)
 
 static void invoke_done (s4pp_ctx_t *ctx, bool success)
 {
-fprintf(stderr,"invoke_done: %d\n", success);
   s4pp_done_fn done = ctx->done;
   ctx->done = NULL;
   if (done)
@@ -222,7 +221,6 @@ static bool process_out_buffer (s4pp_ctx_t *ctx, bool flush)
   {
     ctx->state = S4PP_ERRORED;
     ctx->err = S4PP_NETWORK_ERROR;
-fprintf(stderr, "process out buffer send failed\n");
     ctx->io->disconnect (ctx->conn);
     ctx->conn = NULL;
     invoke_done (ctx, false);
@@ -239,7 +237,6 @@ fprintf(stderr, "process out buffer send failed\n");
 
 static void send_commit (s4pp_ctx_t *ctx)
 {
-fprintf(stderr,"send_commit\n");
   unsigned digest_len = ctx->digest.mech->digest_size;
   char *outbuf = get_line_buffer (ctx, 4 + digest_len * 2 + 1); // SIG:digest\n
   if (!outbuf)
@@ -258,7 +255,6 @@ fprintf(stderr,"send_commit\n");
 
 static bool prepare_begin_seq (s4pp_ctx_t *ctx)
 {
-fprintf(stderr,"prepare_begin_seq\n");
   clear_dict (ctx);
   ctx->seq.last_time = 0;
   ctx->seq.n_sent = 0;
@@ -269,11 +265,12 @@ fprintf(stderr,"prepare_begin_seq\n");
   if (!outbuf)
     return false;
   unsigned overreach =
-    max_buf_len - sprintf (outbuf, "SEQ:%u,0,0,1,0\n", ctx->seq.seq_no++);
+    max_buf_len - sprintf (outbuf, "SEQ:%u,0,1,0\n", ctx->seq.seq_no++);
   return_buffer (ctx, overreach);
   ctx->state = S4PP_BUFFERING;
 
   init_hmac (ctx);
+  update_hmac (ctx, ctx->authtok, strlen (ctx->authtok));
   update_hmac (ctx, outbuf, max_buf_len - overreach);
   return true;
 }
@@ -286,7 +283,6 @@ static bool prepare_dict_entry (s4pp_ctx_t *ctx, const char *name, unsigned *idx
     if (strcmp (name, d->name) == 0)
     {
       *idx = d->idx;
-fprintf(stderr,"found dict idx %u for %s\n", d->idx, name);
       return true;
     }
   }
@@ -306,16 +302,13 @@ fprintf(stderr,"found dict idx %u for %s\n", d->idx, name);
   // DICT:<idx>,,1,<name>\n
   unsigned max_buf_len = 5 + 10 + 4 + len + 1;
   char *outbuf = get_line_buffer (ctx, max_buf_len);
-fprintf(stderr,"got line buffer %p\n", outbuf);
   if (!outbuf)
     return false;
   unsigned overreach =
     max_buf_len - sprintf (outbuf, "DICT:%u,,1,%s\n", d->idx, name);
   return_buffer (ctx, overreach);
-fprintf(stderr,"buffer overreach: %u\n", overreach);
 
   update_hmac (ctx, outbuf, max_buf_len - overreach);
-fprintf(stderr,"allocated new idx %u for %s\n", d->idx, name);
   *idx = d->idx;
   return true;
 }
@@ -341,7 +334,6 @@ static void prepare_sample_entry (s4pp_ctx_t *ctx, const s4pp_sample_t *sample, 
 
   ctx->seq.last_time = sample->timestamp;
   ++ctx->seq.n_sent;
-
   update_hmac (ctx, outbuf, n);
 }
 
@@ -436,7 +428,6 @@ static void handle_auth (s4pp_ctx_t *ctx, char *token, uint16_t len)
   if (!ctx->io->send (ctx->conn, outbuf, sizeof (outbuf)))
   {
 // FIXME: why separate send here??
-   fprintf(stderr, "handle auth send failed\n");
     ctx->io->disconnect (ctx->conn);
     ctx->waiting_for_sent = false;
     ctx->err = S4PP_NETWORK_ERROR; // mark as error while we reconnect
@@ -457,7 +448,6 @@ static bool handle_line (s4pp_ctx_t *ctx, char *line, uint16_t len)
     line[len -1] = 0;
   else
     goto protocol_error;
-fprintf(stderr, "handle line, state is %d, line:%s\n", ctx->state, line);
   if (strncmp ("S4PP/", line, 5) == 0)
   {
     // S4PP/x.y <algo,algo...> <max_samples>
@@ -494,7 +484,6 @@ fprintf(stderr, "handle line, state is %d, line:%s\n", ctx->state, line);
   return_res;
 
 protocol_error:
-fprintf(stderr, "proto err in handle_line\n");
   ctx->io->disconnect (ctx->conn);
   ctx->conn = NULL;
   ctx->err = S4PP_PROTOCOL_ERROR;
@@ -514,7 +503,6 @@ bool s4pp_on_recv (s4pp_ctx_t *ctx, char *data, uint16_t len)
 
   if (!len) // remote side disconnected
   {
-  fprintf(stderr, "remote disconnect\n");
     ctx->io->disconnect (ctx->conn); // free the conn
     ctx->conn = NULL;
     if (ctx->state == S4PP_BUFFERING || ctx->state == S4PP_COMMITTING)
@@ -586,7 +574,6 @@ bool s4pp_on_recv (s4pp_ctx_t *ctx, char *data, uint16_t len)
 
 static void progress_work (s4pp_ctx_t *ctx)
 {
-fprintf(stderr,"progress work in state %d\n", ctx->state);
   switch (ctx->state)
   {
     case S4PP_INIT:
@@ -634,7 +621,6 @@ fprintf(stderr,"progress work in state %d\n", ctx->state);
       break; // waiting for OK/NOK, nothing to do
     case S4PP_ERRORED:
     default:
-fprintf(stderr, "progress_work but state is %d\n", ctx->state);
       // We have work to do, but something went wrong, so reconnect if possible
       if (ctx->conn)
         ctx->io->disconnect (ctx->conn);
@@ -653,7 +639,6 @@ fprintf(stderr, "progress_work but state is %d\n", ctx->state);
 
 bool s4pp_on_sent (s4pp_ctx_t *ctx)
 {
-fprintf(stderr,"on_sent\n");
   ctx->waiting_for_sent = false;
   if (ctx->want_commit_on_sent)
   {
@@ -679,7 +664,6 @@ bool s4pp_pull (s4pp_ctx_t *ctx, s4pp_next_fn next, s4pp_done_fn done)
 
 void s4pp_flush (s4pp_ctx_t *ctx, s4pp_done_fn done)
 {
-fprintf(stderr, "flush in state %d\n", ctx->state);
   if (ctx->state != S4PP_BUFFERING)
     done (ctx, true);
   else
@@ -728,7 +712,6 @@ s4pp_error_t s4pp_last_error (s4pp_ctx_t *ctx)
 
 void s4pp_destroy (s4pp_ctx_t *ctx)
 {
-  fprintf(stderr, "destroy\n");
   if (!ctx)
     return;
   clear_dict (ctx);

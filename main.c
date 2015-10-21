@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <poll.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -9,8 +10,11 @@
 #include <errno.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <time.h>
 
 #include <stdio.h>
+
+#define info(x...) do { if (verbose) printf(x); } while (0)
 
 struct s4pp_server
 {
@@ -42,6 +46,8 @@ static struct
   size_t len;
   char *lastline;
 } inbuf;
+
+static bool verbose;
 
 
 static void on_quit (int sig)
@@ -87,7 +93,6 @@ static char *get_line (void)
     free (inbuf.lastline);
     inbuf.lastline = strdup (inbuf.bytes);
     size_t linelen = nl - inbuf.bytes + 1; // including \0
-fprintf(stderr,"shrunk inbuf from %u to %u\n", inbuf.len, inbuf.len - linelen);
     memmove (inbuf.bytes, inbuf.bytes + linelen, inbuf.len - linelen);
     inbuf.len -= linelen;
     if (linelen > 1 && inbuf.lastline[linelen -2] == '\r')
@@ -118,9 +123,11 @@ static void handle_sample_input (void)
   }
   if (ret == 0)
   {
-    terminate = true; // eol on input
+    if (!inbuf.len || !memchr (inbuf.bytes, '\n', inbuf.len))
+      terminate = true; // eol on input, and no more lines buffered
     return;
   }
+  // TODO: limit buffer size
   inbuf.bytes = realloc (inbuf.bytes, inbuf.len + ret);
   if (inbuf.bytes)
   {
@@ -134,7 +141,6 @@ static void handle_sample_input (void)
 
 static s4pp_conn_t *do_conn (const s4pp_server_t *server)
 {
-fprintf(stderr, "=====> do_conn\n");
   struct addrinfo hints = { 0 };
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_NUMERICSERV;
@@ -154,7 +160,10 @@ fprintf(stderr, "=====> do_conn\n");
     sock = -1;
   }
   if (sock == -1)
-    return NULL; // TODO: log about this fact
+  {
+    info("warn: failed to connect to %s:%s\n", server->hostname, server->port);
+    return NULL;
+  }
   freeaddrinfo (addrs);
 
   // TODO: set a timeout in case server never sends anything
@@ -175,7 +184,6 @@ fprintf(stderr, "=====> do_conn\n");
 
 static void do_disconn (s4pp_conn_t *conn)
 {
-fprintf(stderr, "do_disconn\n");
   io.pollfd[POLLFD_SOCK].fd = -1;
   io.conn = NULL;
   close (conn->sockfd);
@@ -248,9 +256,7 @@ static bool next_sample (s4pp_ctx_t *ctx, s4pp_sample_t *sample)
 get_a_line:
   while (!(line = get_line ()))
   {
-fprintf(stderr, "next sample poll\n");
     int ret = poll (io.pollfd, POLLFD_MAX, get_poll_timeout ());
-fprintf(stderr, "revents: %u %u\n", io.pollfd[0].revents, io.pollfd[1].revents);
     if (ret < 0)
     {
       if (errno == EINTR && !terminate)
@@ -267,6 +273,8 @@ fprintf(stderr, "revents: %u %u\n", io.pollfd[0].revents, io.pollfd[1].revents);
       handle_sample_input ();
     if (io.pollfd[POLLFD_SOCK].revents)
       handle_sock_input ();
+    if (terminate)
+      return false;
   }
   char *t = strtok (line, ",");
   char *name = strtok (NULL, ",");
@@ -284,10 +292,18 @@ fprintf(stderr, "revents: %u %u\n", io.pollfd[0].revents, io.pollfd[1].revents);
 
 static void final_flush_done (s4pp_ctx_t *ctx, bool success)
 {
-fprintf(stderr,"final flush done: %d\n", success);
   (void)ctx;
-  (void)success;
+  info("Flush %s\n", success ? "ok." : "failed.");
   terminate = true;
+}
+
+
+static int syntax (const char *pname)
+{
+  fprintf (stderr,
+    "Syntax: %s [-h] | -u <user> -k <keyfile> -s <server> [-p <port>\n",
+    pname);
+  return 2;
 }
 
 
@@ -305,10 +321,41 @@ int main (int argc, char *argv[])
   io.pollfd[POLLFD_SAMPLES].events = POLLIN;
 
   s4pp_io_t ios = { do_conn, do_disconn, do_send, 1400 };
-  s4pp_auth_t auth = { "keyid", (uint8_t*)"keydata", 7 }; // TODO
-  s4pp_server_t server = { "localhost", /* TODO */ "22226" };
+  s4pp_auth_t auth = { 0, }; //{ "johny", (uint8_t*)"FIXME", 5 }; // TODO
+  s4pp_server_t server = { 0, "22226" };
+
+  int opt;
+  while ((opt = getopt (argc, argv, "u:k:s:p:vh")) != -1)
+  {
+    switch (opt)
+    {
+      case 'h': return syntax (argv[0]);
+      case 'u': auth.key_id = optarg; break;
+      case 'k': // TODO load key from file
+      {
+        int fd = open (optarg, O_RDONLY);
+        auth.key_len = lseek (fd, 0, SEEK_END);
+        auth.key_bytes = mmap (0, auth.key_len, PROT_READ, MAP_PRIVATE, fd, 0);
+        break;
+      }
+      case 's': server.hostname = optarg; break;
+      case 'p': server.port = optarg; break;
+      case 'v': verbose = true; break;
+      default:
+        verbose = true;
+        info("unknown option '%c'\n", opt);
+        return 1;
+    }
+  }
+
+  if (!auth.key_id || !auth.key_bytes || !server.hostname)
+    return syntax (argv[0]);
+
+  int restart_wait;
 
 fresh_start:
+  restart_wait = time (NULL) + 5;
+  errored = false;
   ctx = s4pp_create (&ios, crypto_all_mechs (), &auth, &server);
   if (!ctx)
     return 1;
@@ -328,10 +375,9 @@ fresh_start:
       if (io.pollfd[POLLFD_SOCK].revents)
         handle_sock_input ();
 
-      if (!io.conn)
+      if (!io.conn && restart_wait < time (NULL))
       {
-        // TODO: throttle this
-        fprintf(stderr, "no current connection, restarting pull...\n");
+        info("Connection lost, restarting...\n");
         s4pp_destroy (ctx);
         goto fresh_start;
       }
@@ -345,13 +391,14 @@ fresh_start:
   }
   if (!terminate && errored)
   {
-    fprintf(stderr, "errored: samples lost, restarting...\n");
+    info("Unexpected error, restarting...\n");
     s4pp_destroy (ctx);
     goto fresh_start;
   }
 
   if (!errored)
   {
+    info("Flushing sample buffer...\n");
     terminate = false;
     s4pp_flush (ctx, final_flush_done);
     // TODO: set timeout for flush
@@ -370,5 +417,6 @@ fresh_start:
   }
 
   s4pp_destroy (ctx);
+  info("Done.\n");
   return 0;
 }
