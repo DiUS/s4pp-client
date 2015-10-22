@@ -66,12 +66,6 @@ typedef struct s4pp_ctx
   s4pp_next_fn next;
   s4pp_done_fn done;
 
-  struct
-  {
-    const s4pp_sample_t *samples;
-    unsigned num;
-  } push;
-
   enum {
     S4PP_INIT,
     S4PP_CONNECT,
@@ -679,32 +673,6 @@ void s4pp_flush (s4pp_ctx_t *ctx, s4pp_done_fn done)
     else
       send_commit (ctx);
   }
-}
-
-
-static bool s4pp_push_next (s4pp_ctx_t *ctx, s4pp_sample_t *sample)
-{
-  if (ctx->push.num)
-  {
-    *sample = *ctx->push.samples++;
-    --ctx->push.num;
-    return true;
-  }
-  else
-    return false;
-}
-
-
-bool s4pp_push (s4pp_ctx_t *ctx, const s4pp_sample_t *samples, unsigned num, s4pp_done_fn done)
-{
-  if (ctx->next || ctx->done)
-    return_err (S4PP_ALREADY_BUSY);
-  ctx->push.samples = samples;
-  ctx->push.num = num;
-  ctx->done = done;
-  ctx->next = s4pp_push_next;
-  progress_work (ctx);
-  return_res;
 }
 
 

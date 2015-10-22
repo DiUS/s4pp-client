@@ -147,25 +147,6 @@ bool s4pp_pull (s4pp_ctx_t *ctx, s4pp_next_fn next, s4pp_done_fn done);
 void s4pp_flush (s4pp_ctx_t *ctx, s4pp_done_fn done);
 
 /**
- * This is a convenience function around @c s4pp_pull() for submitting a batch
- * of samples in one go. All samples will be sent in the same S4PP sequence,
- * but may be sent as part of an already commenced sequence. If the number
- * of samples exceeds what the server is willing to receive in a single
- * batch, the @c done callback will be invoked immediately indicating a
- * a failure, and @c s4pp_last_error() will return S4PP_BATCH_TOO_LARGE.
- * Only a single push/pull operation may be in effect at any given time on a
- * context, or an S4PP_ALREADY_BUSY error results.
- * @param ctx The s4pp context.
- * @param samples The samples to send.
- * @param num The number of samples in the batch.
- * @param done Callback to be invoked when the samples have been processed.
- *   If NULL, the sequence is not automatically committed at the end.
- *   Additional push/pull/flush operations are required to commit the samples.
- * @return true if the push operation could be started.
- */
-bool s4pp_push (s4pp_ctx_t *ctx, const s4pp_sample_t *samples, unsigned num, s4pp_done_fn done);
-
-/**
  * Destroys an s4pp context and frees all associated resources.
  * Any in-progress sequences are aborted without notifications.
  * @param ctx The s4pp context.
@@ -179,7 +160,6 @@ typedef enum
   S4PP_NETWORK_ERROR,
   S4PP_PROTOCOL_ERROR,
   S4PP_FATAL_ERROR, /* server not compatible */
-  S4PP_BATCH_TOO_LARGE,
   S4PP_ALREADY_BUSY,
   S4PP_SEQUENCE_NOT_COMMITTED,
 } s4pp_error_t;
