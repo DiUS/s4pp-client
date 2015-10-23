@@ -400,7 +400,7 @@ static void handle_auth (s4pp_ctx_t *ctx, char *token, uint16_t len)
   if (ctx->authtok)
     free (ctx->authtok);
 
-  ctx->authtok = malloc (len);
+  ctx->authtok = calloc (1, len +1);
   memmove (ctx->authtok, token, len);
 
 

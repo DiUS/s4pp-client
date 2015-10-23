@@ -25,6 +25,8 @@ struct s4pp_server
 struct s4pp_conn
 {
   int sockfd;
+  char *outq;
+  size_t outlen;
 };
 
 
@@ -47,8 +49,17 @@ static struct
   char *lastline;
 } inbuf;
 
+
+typedef struct sample_list
+{
+  s4pp_sample_t sample;
+  struct sample_list *next;
+} sample_list_t;
+static sample_list_t *samples;
+static sample_list_t *last_pulled_sample;
+
 static bool verbose;
-static int commit_interval;
+static int commit_interval = 30;
 static time_t next_commit;
 
 
@@ -56,6 +67,13 @@ static void on_quit (int sig)
 {
   (void)sig;
   terminate = true;
+}
+
+
+static void out_of_mem (void)
+{
+  fprintf (stderr, "Error: out of memory, terminating.\n");
+  exit (3);
 }
 
 
@@ -71,27 +89,6 @@ static int get_poll_timeout (void)
   }
   else
       return -1;
-}
-
-
-static void handle_sock_input (void)
-{
-  if (io.pollfd[POLLFD_SOCK].revents & POLLIN)
-  {
-    char buf[2048];
-    ssize_t ret;
-    while ((ret = read (io.pollfd[POLLFD_SOCK].fd, buf, sizeof (buf))) < 0)
-    {
-      if (errno == EINTR)
-        continue;
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
-        return; // "impossible"
-      errored |= !s4pp_on_recv (ctx, NULL, 0); // error, drop the connection
-    }
-    errored |= !s4pp_on_recv (ctx, buf, (uint16_t)ret);
-  }
-  if (io.pollfd[POLLFD_SOCK].revents & (POLLHUP | POLLERR | POLLNVAL))
-    errored |= !s4pp_on_recv (ctx, NULL, 0); // connection dead
 }
 
 
@@ -118,16 +115,80 @@ static char *get_line (void)
 static void on_checkpoint (s4pp_ctx_t *ctx, bool success)
 {
   (void)ctx;
-  fprintf(stderr, "checkpoint: %d\n", success);
+  if (success)
+  {
+    while (samples != last_pulled_sample)
+    {
+      sample_list_t *sl = samples;
+      free (samples);
+      samples = sl->next;
+    }
+    if (last_pulled_sample)
+    {
+      samples = last_pulled_sample->next;
+      free (last_pulled_sample);
+    }
+  }
+  last_pulled_sample = NULL;
 }
+
+
+static bool next_sample (s4pp_ctx_t *ctx, s4pp_sample_t *sample)
+{
+  (void)ctx;
+  sample_list_t *sl = last_pulled_sample ? last_pulled_sample->next : samples;
+  if (!sl)
+    return false;
+  *sample = sl->sample;
+  last_pulled_sample = sl;
+  return true;
+}
+
 
 static void handle_poll_timeout (void)
 {
-  if (commit_interval > 0)
+  next_commit = time (NULL) + commit_interval;
+
+  char *line;
+  sample_list_t **sample_next = &samples;
+  unsigned count = 0;
+  // make sure're we're appending to the list
+  for ( ;*sample_next; sample_next = &(*sample_next)->next)
+    ++count;
+  if (count)
+    info ("Appending to %u queued samples\n", count);
+  while ((line = get_line ()))
   {
-    next_commit = time (NULL) + commit_interval;
-    fprintf(stderr,"checkpoint, flushing...\n");
-    s4pp_flush (ctx, on_checkpoint);
+    char *t = strtok (line, ",");
+    char *name = strtok (NULL, ",");
+    char *val = strtok (NULL, ",");
+    if (!t || !name || !val)
+    {
+      info ("Bad sample format: %s,%s,%s\n", t, name, val);
+      continue;
+    }
+    sample_list_t *sl = calloc (1, sizeof (sample_list_t));
+    if (!sl)
+      out_of_mem ();
+    sl->sample.timestamp = strtoul (t, NULL, 0);
+    sl->sample.name = name;
+    sl->sample.val.formatted = val;
+    sl->sample.type = S4PP_FORMATTED;
+    *sample_next = sl;
+    sample_next = &sl->next;
+    ++count;
+  }
+  if (count)
+  {
+    if (!s4pp_pull (ctx, next_sample, on_checkpoint))
+    {
+      if (s4pp_last_error (ctx) != S4PP_ALREADY_BUSY)
+        errored = true;
+      else
+        info ("Upload still running... (%u samples to go)\n", count);
+    }
+    else
+      info ("Uploading %u+ samples...\n", count);
   }
 }
 
@@ -157,7 +218,7 @@ static void handle_sample_input (void)
     inbuf.len += ret;
   }
   else
-    errored = true; // TODO: just exit with a message?
+    out_of_mem ();
 }
 
 
@@ -183,20 +244,21 @@ static s4pp_conn_t *do_conn (const s4pp_server_t *server)
   }
   if (sock == -1)
   {
-    info("warn: failed to connect to %s:%s\n", server->hostname, server->port);
+    info ("Failed to connect to %s:%s\n", server->hostname, server->port);
     return NULL;
   }
   freeaddrinfo (addrs);
 
   // TODO: set a timeout in case server never sends anything
 
-  io.conn = malloc (sizeof (s4pp_conn_t));
+  io.conn = calloc (1, sizeof (s4pp_conn_t));
   if (io.conn)
   {
     fcntl (sock, F_SETFL, O_NONBLOCK);
     io.conn->sockfd = sock;
     io.pollfd[POLLFD_SOCK].fd = sock;
     io.pollfd[POLLFD_SOCK].events = POLLIN;
+    info ("Connected to %s:%s\n", server->hostname, server->port);
   }
   else
     close (sock);
@@ -206,15 +268,19 @@ static s4pp_conn_t *do_conn (const s4pp_server_t *server)
 
 static void do_disconn (s4pp_conn_t *conn)
 {
+  info ("Disconnect\n");
   io.pollfd[POLLFD_SOCK].fd = -1;
   io.conn = NULL;
   close (conn->sockfd);
+  free (conn->outq);
   free (conn);
 }
 
 
 static bool do_send (s4pp_conn_t *conn, const char *data, uint16_t len)
 {
+  // We'll want to call s4pp_on_sent from the main loop, so flag POLLOUT
+  io.pollfd[POLLFD_SOCK].events |= POLLOUT;
   ssize_t written;
   while ((written = write (conn->sockfd, data, len)) != len)
   {
@@ -224,39 +290,16 @@ static bool do_send (s4pp_conn_t *conn, const char *data, uint16_t len)
         continue;
       if (errno == EAGAIN || errno == EWOULDBLOCK)
       {
-        io.pollfd[POLLFD_SOCK].events |= POLLOUT;
-        int ret;
-        // secondary event loop, while waiting for sock to become writable
-        while (true)
-        {
-          io.pollfd[POLLFD_SOCK].revents = 0;
-          io.pollfd[POLLFD_SAMPLES].revents = 0;
-          ret = poll (io.pollfd, POLLFD_MAX, -1);
-          if (ret < 0)
-          {
-            if (ret == EINTR)
-              continue;
-            else
-              return false;
-          }
-          else if (ret > 0)
-          {
-            // prioritise handling of writable sock to minimise complexity
-            if (io.pollfd[POLLFD_SOCK].revents & POLLOUT)
-              break;
-            if (io.pollfd[POLLFD_SOCK].revents & (POLLERR | POLLHUP | POLLNVAL))
-              return false;
-
-            if (io.pollfd[POLLFD_SAMPLES].revents)
-              handle_sample_input ();
-            if (io.pollfd[POLLFD_SOCK].revents)
-              handle_sock_input ();
-          }
-        }
-        io.pollfd[POLLFD_SOCK].events &= ~POLLOUT;
+        char *buf = malloc (len);
+        if (!buf)
+          return false;
+        memmove (buf, data, len);
+        free (conn->outq); // only free after copy, as might copy from outq!
+        conn->outq = buf;
+        conn->outlen = len;
+        return true;
       }
-      else
-        return false;
+      return false;
     }
     else
     {
@@ -264,56 +307,48 @@ static bool do_send (s4pp_conn_t *conn, const char *data, uint16_t len)
       data += written;
     }
   }
-  errored |= !s4pp_on_sent (ctx);
+  // if we get here we've sent everything we wanted, which *may* have been
+  // from the outq, so clear it to avoid resends
+  free (conn->outq);
+  conn->outq = NULL;
+  conn->outlen = 0;
   return true;
 }
 
 
-static bool next_sample (s4pp_ctx_t *ctx, s4pp_sample_t *sample)
+static void handle_sock_input (void)
 {
-  (void)ctx;
-  char *line;
-get_a_line:
-  while (!(line = get_line ()))
+  if (io.pollfd[POLLFD_SOCK].revents & POLLOUT)
   {
-    int ret = poll (io.pollfd, POLLFD_MAX, get_poll_timeout ());
-    if (ret < 0)
-    {
-      if (errno == EINTR && !terminate)
-        continue;
-      else
-      {
-        errored |= !terminate;
-        return false;
-      }
-    }
-    if (ret == 0)
-      return false;
-    if (io.pollfd[POLLFD_SAMPLES].revents)
-      handle_sample_input ();
-    if (io.pollfd[POLLFD_SOCK].revents)
-      handle_sock_input ();
-    if (terminate)
-      return false;
+    io.pollfd[POLLFD_SOCK].events &= ~POLLOUT;
+    if (io.conn && io.conn->outq)
+      do_send (io.conn, io.conn->outq, io.conn->outlen);
+    else
+      errored |= !s4pp_on_sent (ctx);
   }
-  char *t = strtok (line, ",");
-  char *name = strtok (NULL, ",");
-  char *val = strtok (NULL, ",");
-  if (!t || !name || !val)
-    goto get_a_line; // bad formatting, skip it
-
-  sample->timestamp = strtoul (t, NULL, 0);
-  sample->name = name;
-  sample->val.formatted = val;
-  sample->type = S4PP_FORMATTED;
-  return true;
+  if (io.pollfd[POLLFD_SOCK].revents & POLLIN)
+  {
+    char buf[2048];
+    ssize_t ret;
+    while ((ret = read (io.pollfd[POLLFD_SOCK].fd, buf, sizeof (buf))) < 0)
+    {
+      if (errno == EINTR)
+        continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return; // "impossible"
+      errored |= !s4pp_on_recv (ctx, NULL, 0); // error, drop the connection
+    }
+    errored |= !s4pp_on_recv (ctx, buf, (uint16_t)ret);
+  }
+  if (io.pollfd[POLLFD_SOCK].revents & (POLLHUP | POLLERR | POLLNVAL))
+    errored |= !s4pp_on_recv (ctx, NULL, 0); // connection dead
 }
 
 
 static void final_flush_done (s4pp_ctx_t *ctx, bool success)
 {
   (void)ctx;
-  info("Flush %s\n", success ? "ok." : "failed.");
+  info ("Flush %s\n", success ? "ok." : "failed.");
   terminate = true;
 }
 
@@ -321,7 +356,7 @@ static void final_flush_done (s4pp_ctx_t *ctx, bool success)
 static int syntax (const char *pname)
 {
   fprintf (stderr,
-    "Syntax: %s [-h] | -u <user> -k <keyfile> -s <server> [-p <port>\n",
+    "Syntax: %s [-h] | -u <user> -k <keyfile> -s <server> [-p <port>] [-i <upload_interval>] [-v]\n",
     pname);
   return 2;
 }
@@ -341,7 +376,7 @@ int main (int argc, char *argv[])
   io.pollfd[POLLFD_SAMPLES].events = POLLIN;
 
   s4pp_io_t ios = { do_conn, do_disconn, do_send, 1400 };
-  s4pp_auth_t auth = { 0, }; //{ "johny", (uint8_t*)"FIXME", 5 }; // TODO
+  s4pp_auth_t auth = { 0, };
   s4pp_server_t server = { 0, "22226" };
 
   int opt;
@@ -351,7 +386,7 @@ int main (int argc, char *argv[])
     {
       case 'h': return syntax (argv[0]);
       case 'u': auth.key_id = optarg; break;
-      case 'k': // TODO load key from file
+      case 'k':
       {
         int fd = open (optarg, O_RDONLY);
         auth.key_len = lseek (fd, 0, SEEK_END);
@@ -367,7 +402,7 @@ int main (int argc, char *argv[])
       case 'v': verbose = true; break;
       default:
         verbose = true;
-        info("unknown option '%c'\n", opt);
+        info ("Unknown option '%c'\n", opt);
         return 1;
     }
   }
@@ -375,20 +410,14 @@ int main (int argc, char *argv[])
   if (!auth.key_id || !auth.key_bytes || !server.hostname)
     return syntax (argv[0]);
 
-  int restart_wait;
-
 fresh_start:
-  restart_wait = time (NULL) + 5;
   errored = false;
   ctx = s4pp_create (&ios, crypto_all_mechs (), &auth, &server);
   if (!ctx)
     return 1;
 
-  s4pp_pull (ctx, next_sample, NULL);
-
   while (!terminate && !errored)
   {
-
     io.pollfd[POLLFD_SOCK].revents = 0;
     io.pollfd[POLLFD_SAMPLES].revents = 0;
     int ret = poll (io.pollfd, POLLFD_MAX, get_poll_timeout ());
@@ -398,35 +427,30 @@ fresh_start:
         handle_sample_input ();
       if (io.pollfd[POLLFD_SOCK].revents)
         handle_sock_input ();
-
-      if (!io.conn && restart_wait < time (NULL))
-      {
-        info("Connection lost, restarting...\n");
-        s4pp_destroy (ctx);
-        goto fresh_start;
-      }
     }
     else if (ret == 0)
       handle_poll_timeout ();
     else if (errno == EINTR)
       continue;
     else
-      errored = true;
+      break;
   }
-  if (!terminate && errored)
+  if (!terminate)
   {
-    info("Unexpected error, restarting...\n");
+    info ("%s error (%d), restarting...\n",
+      errored ? "S4PP" : "Poll",
+      errored ? (int)s4pp_last_error (ctx) : errno);
     s4pp_destroy (ctx);
     goto fresh_start;
   }
 
   if (!errored)
   {
-    info("Flushing sample buffer...\n");
+    info ("Flushing sample buffer...\n");
     terminate = false;
     s4pp_flush (ctx, final_flush_done);
-    // TODO: set timeout for flush
     io.pollfd[POLLFD_SAMPLES].fd = -1; // not listening for more samples
+    next_commit = time (NULL) + 5; // 5 sec timeout for flush
     while (!terminate && !errored)
     {
       io.pollfd[POLLFD_SOCK].revents = 0;
@@ -441,6 +465,6 @@ fresh_start:
   }
 
   s4pp_destroy (ctx);
-  info("Done.\n");
+  info ("Done.\n");
   return 0;
 }
