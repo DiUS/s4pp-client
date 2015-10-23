@@ -14,7 +14,10 @@
 
 #include <stdio.h>
 
-#define info(x...) do { if (verbose) printf(x); } while (0)
+#define info(x...) do { if (verbose) fprintf(stderr,x); } while (0)
+
+#define SAMPLE_THRESHOLD_HI 5000
+#define SAMPLE_THRESHOLD_LO 2000
 
 struct s4pp_server
 {
@@ -31,6 +34,7 @@ struct s4pp_conn
 
 
 static volatile bool terminate;
+static volatile bool eof;
 static volatile bool errored;
 
 static s4pp_ctx_t *ctx;
@@ -46,17 +50,19 @@ static struct
 {
   char *bytes;
   size_t len;
-  char *lastline;
 } inbuf;
 
 
 typedef struct sample_list
 {
   s4pp_sample_t sample;
+  char *line;
   struct sample_list *next;
 } sample_list_t;
 static sample_list_t *samples;
+static sample_list_t *last_sample;
 static sample_list_t *last_pulled_sample;
+static unsigned sample_count;
 
 static bool verbose;
 static int commit_interval = 30;
@@ -95,17 +101,17 @@ static int get_poll_timeout (void)
 static char *get_line (void)
 {
   char *nl = memchr (inbuf.bytes, '\n', inbuf.len);
+  char *line = 0;
   if (nl)
   {
     *nl = 0;
-    free (inbuf.lastline);
-    inbuf.lastline = strdup (inbuf.bytes);
+    line = strdup (inbuf.bytes);
     size_t linelen = nl - inbuf.bytes + 1; // including \0
     memmove (inbuf.bytes, inbuf.bytes + linelen, inbuf.len - linelen);
     inbuf.len -= linelen;
-    if (linelen > 1 && inbuf.lastline[linelen -2] == '\r')
-      inbuf.lastline[linelen -2] = 0;
-    return inbuf.lastline;
+    if (linelen > 1 && line[linelen -2] == '\r')
+      line[linelen -2] = 0;
+    return line;
   }
   else
     return NULL;
@@ -117,17 +123,26 @@ static void on_checkpoint (s4pp_ctx_t *ctx, bool success)
   (void)ctx;
   if (success)
   {
+    unsigned count = 0;
     while (samples != last_pulled_sample)
     {
       sample_list_t *sl = samples;
+      free (samples->line);
       free (samples);
       samples = sl->next;
+      ++count;
     }
     if (last_pulled_sample)
     {
       samples = last_pulled_sample->next;
+      free (last_pulled_sample->line);
       free (last_pulled_sample);
+      ++count;
     }
+    sample_count -= count;
+    if (!sample_count)
+      last_sample = NULL;
+    info ("Committed %u samples (%u still queued)\n", count, sample_count);
   }
   last_pulled_sample = NULL;
 }
@@ -145,18 +160,10 @@ static bool next_sample (s4pp_ctx_t *ctx, s4pp_sample_t *sample)
 }
 
 
-static void handle_poll_timeout (void)
+static void process_inbuf (void)
 {
-  next_commit = time (NULL) + commit_interval;
-
   char *line;
-  sample_list_t **sample_next = &samples;
-  unsigned count = 0;
-  // make sure're we're appending to the list
-  for ( ;*sample_next; sample_next = &(*sample_next)->next)
-    ++count;
-  if (count)
-    info ("Appending to %u queued samples\n", count);
+  sample_list_t **sample_next = last_sample ? &last_sample->next : &samples;
   while ((line = get_line ()))
   {
     char *t = strtok (line, ",");
@@ -170,25 +177,36 @@ static void handle_poll_timeout (void)
     sample_list_t *sl = calloc (1, sizeof (sample_list_t));
     if (!sl)
       out_of_mem ();
+    sl->line = line; // now with a few \0 in it
     sl->sample.timestamp = strtoul (t, NULL, 0);
-    sl->sample.name = name;
-    sl->sample.val.formatted = val;
+    sl->sample.name = strdup (name);
+    sl->sample.val.formatted = strdup (val);
     sl->sample.type = S4PP_FORMATTED;
     *sample_next = sl;
     sample_next = &sl->next;
-    ++count;
+    last_sample = sl;
+    ++sample_count;
   }
-  if (count)
+  if (sample_count >= SAMPLE_THRESHOLD_HI)
+    io.pollfd[POLLFD_SAMPLES].events &= ~POLLIN; // pause input
+}
+
+
+static void handle_poll_timeout (void)
+{
+  next_commit = time (NULL) + commit_interval;
+
+  if (samples)
   {
     if (!s4pp_pull (ctx, next_sample, on_checkpoint))
     {
       if (s4pp_last_error (ctx) != S4PP_ALREADY_BUSY)
         errored = true;
       else
-        info ("Upload still running... (%u samples to go)\n", count);
+        info ("Upload still running... (%u samples to go)\n", sample_count);
     }
     else
-      info ("Uploading %u+ samples...\n", count);
+      info ("Uploading %u+ samples...\n", sample_count);
   }
 }
 
@@ -201,16 +219,12 @@ static void handle_sample_input (void)
   {
     if (errno == EINTR)
       continue;
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
-      return; // "impossible"
+    else
+      goto end_of_samples;
   }
   if (ret == 0)
-  {
-    if (!inbuf.len || !memchr (inbuf.bytes, '\n', inbuf.len))
-      terminate = true; // eol on input, and no more lines buffered
-    return;
-  }
-  // TODO: limit buffer size
+    goto end_of_samples;
+
   inbuf.bytes = realloc (inbuf.bytes, inbuf.len + ret);
   if (inbuf.bytes)
   {
@@ -219,6 +233,14 @@ static void handle_sample_input (void)
   }
   else
     out_of_mem ();
+
+  process_inbuf ();
+  return;
+
+end_of_samples:
+  info ("End of input, waiting for samples to drain.\n");
+  eof = true;
+  io.pollfd[POLLFD_SAMPLES].fd = -1;
 }
 
 
@@ -270,6 +292,8 @@ static void do_disconn (s4pp_conn_t *conn)
 {
   info ("Disconnect\n");
   io.pollfd[POLLFD_SOCK].fd = -1;
+  io.pollfd[POLLFD_SOCK].events = 0;
+  io.pollfd[POLLFD_SOCK].revents = 0;
   io.conn = NULL;
   close (conn->sockfd);
   free (conn->outq);
@@ -292,7 +316,7 @@ static bool do_send (s4pp_conn_t *conn, const char *data, uint16_t len)
       {
         char *buf = malloc (len);
         if (!buf)
-          return false;
+          out_of_mem ();
         memmove (buf, data, len);
         free (conn->outq); // only free after copy, as might copy from outq!
         conn->outq = buf;
@@ -337,19 +361,13 @@ static void handle_sock_input (void)
       if (errno == EAGAIN || errno == EWOULDBLOCK)
         return; // "impossible"
       errored |= !s4pp_on_recv (ctx, NULL, 0); // error, drop the connection
+      return;
     }
     errored |= !s4pp_on_recv (ctx, buf, (uint16_t)ret);
   }
-  if (io.pollfd[POLLFD_SOCK].revents & (POLLHUP | POLLERR | POLLNVAL))
+  if (io.conn &&
+      io.pollfd[POLLFD_SOCK].revents & (POLLHUP | POLLERR | POLLNVAL))
     errored |= !s4pp_on_recv (ctx, NULL, 0); // connection dead
-}
-
-
-static void final_flush_done (s4pp_ctx_t *ctx, bool success)
-{
-  (void)ctx;
-  info ("Flush %s\n", success ? "ok." : "failed.");
-  terminate = true;
 }
 
 
@@ -369,6 +387,7 @@ int main (int argc, char *argv[])
 
   signal (SIGINT, on_quit);
   signal (SIGTERM, on_quit);
+  signal (SIGPIPE, SIG_IGN);
 
   io.pollfd[POLLFD_SOCK].fd = -1;
 
@@ -420,16 +439,28 @@ fresh_start:
   {
     io.pollfd[POLLFD_SOCK].revents = 0;
     io.pollfd[POLLFD_SAMPLES].revents = 0;
-    int ret = poll (io.pollfd, POLLFD_MAX, get_poll_timeout ());
-    if (ret > 0)
+
+    if (sample_count <= SAMPLE_THRESHOLD_LO)
+      io.pollfd[POLLFD_SAMPLES].events |= POLLIN; // unpause input
+
+    if (eof && sample_count == 0)
     {
-      if (io.pollfd[POLLFD_SAMPLES].revents)
-        handle_sample_input ();
+      terminate = true;
+      break;
+    }
+
+    int ret = poll (io.pollfd, POLLFD_MAX, get_poll_timeout ());
+    time_t now = time (NULL);
+    // prioritise kicking off uploads, lest we get stuck processing stdin
+    if (ret == 0 || now > next_commit)
+      handle_poll_timeout ();
+    else if (ret > 0)
+    {
       if (io.pollfd[POLLFD_SOCK].revents)
         handle_sock_input ();
+      if (io.pollfd[POLLFD_SAMPLES].revents)
+        handle_sample_input ();
     }
-    else if (ret == 0)
-      handle_poll_timeout ();
     else if (errno == EINTR)
       continue;
     else
@@ -442,26 +473,6 @@ fresh_start:
       errored ? (int)s4pp_last_error (ctx) : errno);
     s4pp_destroy (ctx);
     goto fresh_start;
-  }
-
-  if (!errored)
-  {
-    info ("Flushing sample buffer...\n");
-    terminate = false;
-    s4pp_flush (ctx, final_flush_done);
-    io.pollfd[POLLFD_SAMPLES].fd = -1; // not listening for more samples
-    next_commit = time (NULL) + 5; // 5 sec timeout for flush
-    while (!terminate && !errored)
-    {
-      io.pollfd[POLLFD_SOCK].revents = 0;
-      int ret = poll (io.pollfd, POLLFD_MAX, get_poll_timeout ());
-      if (ret > 0 && io.pollfd[POLLFD_SOCK].revents)
-        handle_sock_input ();
-      else if (ret == -1 && errno == EINTR)
-        continue;
-      else
-        break; // ok, we failed, just exit
-    }
   }
 
   s4pp_destroy (ctx);

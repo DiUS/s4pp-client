@@ -143,7 +143,10 @@ static void clear_dict (s4pp_ctx_t *ctx)
 static void invoke_done (s4pp_ctx_t *ctx, bool success)
 {
   s4pp_done_fn done = ctx->done;
-  ctx->done = NULL;
+  if (!success)
+    ctx->next = NULL; // failed, stop pulling samples
+  if (!ctx->next)
+	ctx->done = NULL; // final commit
   if (done)
     done (ctx, success);
 }
@@ -213,7 +216,7 @@ static bool process_out_buffer (s4pp_ctx_t *ctx, bool flush)
     return true;
 
   // Swap outbuf & overflow, *before* we get on_sent callback
-  uint16_t len = ctx->outbuf.len;
+  uint16_t used = ctx->outbuf.used;
   char *data = ctx->outbuf.bytes;
   ctx->outbuf.bytes = ctx->outbuf.overflow;
   ctx->outbuf.used = ctx->outbuf.overflow_used;
@@ -221,12 +224,13 @@ static bool process_out_buffer (s4pp_ctx_t *ctx, bool flush)
   ctx->outbuf.overflow_used = 0;
   ctx->waiting_for_sent = true;
 
-  if (!ctx->io->send (ctx->conn, data, len))
+  if (!ctx->io->send (ctx->conn, data, used))
   {
     ctx->waiting_for_sent = false;
     ctx->state = S4PP_ERRORED;
     ctx->err = S4PP_NETWORK_ERROR;
-    ctx->io->disconnect (ctx->conn);
+	if (ctx->conn)
+	  ctx->io->disconnect (ctx->conn);
     ctx->conn = NULL;
     invoke_done (ctx, false);
   }
@@ -319,7 +323,7 @@ static void prepare_sample_entry (s4pp_ctx_t *ctx, const s4pp_sample_t *sample, 
     sample->type == S4PP_FORMATTED ?
       strlen (sample->val.formatted) :
       (unsigned)snprintf (NULL, 0, "%f", sample->val.numeric);
-  unsigned max_buf_len = 10 + 1 + 11 + val_len + 1;
+  unsigned max_buf_len = 10 + 1 + 11 + val_len + 1 + 1;
   char *outbuf = get_line_buffer (ctx, max_buf_len);
   if (!outbuf)
     return;
@@ -427,7 +431,9 @@ static void handle_auth (s4pp_ctx_t *ctx, char *token, uint16_t len)
   if (!ctx->io->send (ctx->conn, outbuf, sizeof (outbuf)))
   {
 // FIXME: why separate send here??
-    ctx->io->disconnect (ctx->conn);
+	if (ctx->conn)
+	  ctx->io->disconnect (ctx->conn);
+	ctx->conn = NULL;
     ctx->waiting_for_sent = false;
     ctx->err = S4PP_NETWORK_ERROR; // mark as error while we reconnect
     if (!ctx->fatal)
@@ -483,7 +489,8 @@ static bool handle_line (s4pp_ctx_t *ctx, char *line, uint16_t len)
   return_res;
 
 protocol_error:
-  ctx->io->disconnect (ctx->conn);
+  if (ctx->conn)
+	ctx->io->disconnect (ctx->conn);
   ctx->conn = NULL;
   ctx->err = S4PP_PROTOCOL_ERROR;
   ctx->state = S4PP_ERRORED;
@@ -502,7 +509,8 @@ bool s4pp_on_recv (s4pp_ctx_t *ctx, char *data, uint16_t len)
 
   if (!len) // remote side disconnected
   {
-    ctx->io->disconnect (ctx->conn); // free the conn
+	if (ctx->conn)
+      ctx->io->disconnect (ctx->conn); // free the conn
     ctx->conn = NULL;
     if (ctx->state == S4PP_BUFFERING || ctx->state == S4PP_COMMITTING)
     {
@@ -576,13 +584,13 @@ static void progress_work (s4pp_ctx_t *ctx)
   switch (ctx->state)
   {
     case S4PP_INIT:
+    case S4PP_CONNECT: // if connect failed, we need to retry the connect
       if (!ctx->conn && !ctx->fatal)
       {
         ctx->conn = ctx->io->connect (ctx->server);
         ctx->state = S4PP_CONNECT;
       }
       break;
-    case S4PP_CONNECT:
     case S4PP_HELLO:
       break; // waiting for hello, nothing to do
     case S4PP_AUTHED:
@@ -607,10 +615,14 @@ static void progress_work (s4pp_ctx_t *ctx)
               break;
             prepare_sample_entry (ctx, &sample, idx);
           }
-          else if (ctx->done)
-            sig = true;
           else
-            break; // end of sample, no explicit commit
+		  {
+			ctx->next = NULL; // mark end of this batch
+		    if (ctx->done)
+              sig = true;
+			else
+		      break;
+		  }
         }
         if (sig)
           send_commit (ctx);
@@ -623,6 +635,7 @@ static void progress_work (s4pp_ctx_t *ctx)
       // We have work to do, but something went wrong, so reconnect if possible
       if (ctx->conn)
         ctx->io->disconnect (ctx->conn);
+      ctx->conn = NULL;
       ctx->err = S4PP_OK;
       if (!ctx->fatal)
       {
@@ -638,6 +651,7 @@ static void progress_work (s4pp_ctx_t *ctx)
 
 bool s4pp_on_sent (s4pp_ctx_t *ctx)
 {
+  ctx->err = S4PP_OK; // clear earlier errors
   ctx->waiting_for_sent = false;
   if (ctx->want_commit_on_sent)
   {
@@ -653,7 +667,10 @@ bool s4pp_on_sent (s4pp_ctx_t *ctx)
 bool s4pp_pull (s4pp_ctx_t *ctx, s4pp_next_fn next, s4pp_done_fn done)
 {
   if (ctx->next || ctx->done)
+  {
+	progress_work (ctx);
     return_err(S4PP_ALREADY_BUSY);
+  }
   ctx->next = next;
   ctx->done = done;
   progress_work (ctx);
