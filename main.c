@@ -126,10 +126,10 @@ static void on_checkpoint (s4pp_ctx_t *ctx, bool success)
     unsigned count = 0;
     while (samples != last_pulled_sample)
     {
-      sample_list_t *sl = samples;
+      sample_list_t *sl = samples->next;
       free (samples->line);
       free (samples);
-      samples = sl->next;
+      samples = sl;
       ++count;
     }
     if (last_pulled_sample)
