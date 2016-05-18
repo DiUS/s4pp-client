@@ -243,7 +243,7 @@ static void send_commit (s4pp_ctx_t *ctx)
   unsigned digest_len = ctx->digest.mech->digest_size;
   char *outbuf = get_line_buffer (ctx, 4 + digest_len * 2 + 1); // SIG:digest\n
   if (!outbuf)
-    return;
+    return; // rely on connection failing later; FIXME
 
   strcpy (outbuf, "SIG:");
   char *digest = outbuf + 4;
@@ -628,8 +628,12 @@ static void progress_work (s4pp_ctx_t *ctx)
           send_commit (ctx);
       }
       break;
-    case S4PP_COMMITTING:
-      break; // waiting for OK/NOK, nothing to do
+    case S4PP_COMMITTING: // waiting for OK/NOK
+      // we might only have buffered the SIG: in the overflow area, so
+      // ensure we flush it out in that case.
+      if (ctx->outbuf.used)
+          process_out_buffer (ctx, true);
+      break;
     case S4PP_ERRORED:
     default:
       // We have work to do, but something went wrong, so reconnect if possible
