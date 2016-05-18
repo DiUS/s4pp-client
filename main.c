@@ -11,10 +11,12 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <time.h>
+#include <syslog.h>
 
 #include <stdio.h>
 
 #define info(x...) do { if (verbose) fprintf(stderr,x); } while (0)
+#define warn(x...) do { info(x); syslog(LOG_WARNING, x); } while (0)
 
 #define SAMPLE_THRESHOLD_HI 5000
 #define SAMPLE_THRESHOLD_LO 2000
@@ -76,9 +78,21 @@ static void on_quit (int sig)
 }
 
 
+static void on_usr1 (int sig)
+{
+  (void)sig;
+  syslog (LOG_INFO,
+    "%u queued samples, %zu bytes in buffer, next commit at %ld (%s), "
+    "io.pollfd[].fd = { %d, %d }",
+    sample_count, inbuf.len, next_commit, ctime (&next_commit),
+    io.pollfd[0].fd, io.pollfd[1].fd);
+}
+
+
 static void out_of_mem (void)
 {
   fprintf (stderr, "Error: out of memory, terminating.\n");
+  syslog (LOG_ERR, "out of memory, terminating");
   exit (3);
 }
 
@@ -171,7 +185,7 @@ static void process_inbuf (void)
     char *val = strtok (NULL, ",");
     if (!t || !name || !val)
     {
-      info ("Bad sample format: %s,%s,%s\n", t, name, val);
+      warn ("Bad sample format: %s,%s,%s\n", t, name, val);
       continue;
     }
     sample_list_t *sl = calloc (1, sizeof (sample_list_t));
@@ -259,6 +273,10 @@ static s4pp_conn_t *do_conn (const s4pp_server_t *server)
     sock = socket (ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (sock == -1)
       continue;
+
+    int enable = 1;
+    setsockopt (sock, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable));
+
     if (connect (sock, ai->ai_addr, ai->ai_addrlen) == 0)
       break;
     close (sock);
@@ -266,7 +284,7 @@ static s4pp_conn_t *do_conn (const s4pp_server_t *server)
   }
   if (sock == -1)
   {
-    info ("Failed to connect to %s:%s\n", server->hostname, server->port);
+    warn ("Failed to connect to %s:%s\n", server->hostname, server->port);
     return NULL;
   }
   freeaddrinfo (addrs);
@@ -388,6 +406,7 @@ int main (int argc, char *argv[])
   signal (SIGINT, on_quit);
   signal (SIGTERM, on_quit);
   signal (SIGPIPE, SIG_IGN);
+  signal (SIGUSR1, on_usr1);
 
   io.pollfd[POLLFD_SOCK].fd = -1;
 
@@ -433,7 +452,10 @@ fresh_start:
   errored = false;
   ctx = s4pp_create (&ios, crypto_all_mechs (), &auth, &server);
   if (!ctx)
+  {
+    warn ("failed to create s4pp context, exiting");
     return 1;
+  }
 
   while (!terminate && !errored)
   {
@@ -468,7 +490,7 @@ fresh_start:
   }
   if (!terminate)
   {
-    info ("%s error (%d), restarting...\n",
+    warn ("%s error (%d), restarting...\n",
       errored ? "S4PP" : "Poll",
       errored ? (int)s4pp_last_error (ctx) : errno);
     s4pp_destroy (ctx);
