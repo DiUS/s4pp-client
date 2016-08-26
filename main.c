@@ -321,6 +321,8 @@ static void do_disconn (s4pp_conn_t *conn)
 
 static bool do_send (s4pp_conn_t *conn, const char *data, uint16_t len)
 {
+  if (!conn)
+    return false;
   // We'll want to call s4pp_on_sent from the main loop, so flag POLLOUT
   io.pollfd[POLLFD_SOCK].events |= POLLOUT;
   ssize_t written;
@@ -386,6 +388,21 @@ static void handle_sock_input (void)
   if (io.conn &&
       io.pollfd[POLLFD_SOCK].revents & (POLLHUP | POLLERR | POLLNVAL))
     errored |= !s4pp_on_recv (ctx, NULL, 0); // connection dead
+}
+
+
+static void on_notify (s4pp_ctx_t *ctx, unsigned code, unsigned nargs, const char **args)
+{
+  (void)ctx;
+  static const char *known[] = { "TIME", "FIRMWARE", "FLAGS" };
+  printf ("NOTIFY\t");
+  if (code < (sizeof (known) / sizeof (known[0])))
+    printf ("%s", known[code]);
+  else
+    printf ("%u", code);
+  for (unsigned i = 0; i < nargs; ++i)
+    printf ("\t%s", args[i]);
+  printf ("\n");
 }
 
 
@@ -456,6 +473,7 @@ fresh_start:
     warn ("failed to create s4pp context, exiting");
     return 1;
   }
+  s4pp_set_notification_handler (ctx, on_notify);
 
   while (!terminate && !errored)
   {

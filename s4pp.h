@@ -153,6 +153,25 @@ void s4pp_flush (s4pp_ctx_t *ctx, s4pp_done_fn done);
  */
 void s4pp_destroy (s4pp_ctx_t *ctx);
 
+/**
+ * Callback function to receive S4PP notification commands.
+ * @param ctx The s4pp context corresponding to where the notification came from
+ * @param code The notification code.
+ * @param nargs Number of arguments available at @c args.
+ * @param args The notification arguments, if any. if @c nargs is 0, this may be
+ *   null. The arguments are only valid for the duration of the callback.
+ */
+typedef void (*s4pp_ntfy_fn) (s4pp_ctx_t *ctx, unsigned code, unsigned nargs, const char *args[]);
+
+/**
+ * Set the function to receive any notification commands for a particular
+ * context. Notifications received when there is no handler registered are
+ * silently ignored. Only one handler can be registered at any given time.
+ * @param ctx The s4pp context.
+ * @param fn The handler function, or NULL to deregister.
+ */
+void s4pp_set_notification_handler (s4pp_ctx_t *ctx, s4pp_ntfy_fn fn);
+
 typedef enum
 {
   S4PP_OK,

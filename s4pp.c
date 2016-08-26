@@ -8,7 +8,8 @@
 #define return_res     st(return ctx->err == S4PP_OK && !ctx->fatal;)
 #define return_err(x)  st(ctx->err = x; return false;)
 
-#define SUPPORTED_VER "0.9"
+#define SUPPORTED_VER_0_9 "0.9"
+#define SUPPORTED_VER_1_0 "1.0"
 #define MAX_PROTOCOL_ERRORS_BEFORE_FATAL 5
 #define UPPER_PAYLOAD_SIZE 1400 // to be further reduced by io.max_payload
 
@@ -65,6 +66,7 @@ typedef struct s4pp_ctx
 
   s4pp_next_fn next;
   s4pp_done_fn done;
+  s4pp_ntfy_fn ntfy;
 
   enum {
     S4PP_INIT,
@@ -369,7 +371,8 @@ static bool handle_hello (s4pp_ctx_t *ctx, char *line)
   *sp++ = 0;
   char *algos = line;
   char *max_samples = sp;
-  if (strcmp (ver, SUPPORTED_VER) != 0)
+  if (strcmp (ver, SUPPORTED_VER_0_9) != 0 &&
+      strcmp (ver, SUPPORTED_VER_1_0) != 0)
     return false;
 
   ctx->digest.mech = NULL;
@@ -483,6 +486,32 @@ static bool handle_line (s4pp_ctx_t *ctx, char *line, uint16_t len)
     ctx->proto_errs = 0;
     ctx->state = S4PP_AUTHED;
     invoke_done (ctx, true);
+  }
+  else if (strncmp ("NTFY:", line, 5) == 0)
+  {
+    char *argsp = 0;
+    unsigned long code = strtoul (line + 5, &argsp, 10);
+    unsigned nargs = 0;
+    for (char *p = argsp; *p; ++p)
+      if (*p == ',')
+        ++nargs;
+    const char **args = malloc (sizeof (char *) * (nargs + 1));
+    if (args)
+    {
+      unsigned i = 0;
+      for (char *p = argsp; *p; ++p)
+      {
+        if (*p == ',')
+        {
+          args[i++] = p + 1;
+          *p = 0;
+        }
+      }
+      args[i] = 0; // Be nice and leave a null at the end of args array
+      ctx->ntfy (ctx, (unsigned)code, nargs, args);
+      free (args);
+    }
+    // else silently ignore it? or whinge somehow? TODO
   }
   else
     goto protocol_error;
@@ -722,4 +751,12 @@ void s4pp_destroy (s4pp_ctx_t *ctx)
   if (ctx->digest.ctx)
     free (ctx->digest.ctx);
   free (ctx);
+}
+
+
+void s4pp_set_notification_handler (s4pp_ctx_t *ctx, s4pp_ntfy_fn fn)
+{
+  if (!ctx)
+    return;
+  ctx->ntfy = fn;
 }
