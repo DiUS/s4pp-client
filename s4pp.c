@@ -557,7 +557,7 @@ bool s4pp_on_recv (s4pp_ctx_t *ctx, char *data, uint16_t len)
   if (ctx->inbuf.len)
   {
     char *end = nl ? nl : data + len - 1;
-    unsigned dlen = (end - data);
+    unsigned dlen = (end - data) + 1;
     unsigned newlen = ctx->inbuf.len + dlen;
     ctx->inbuf.bytes = realloc (ctx->inbuf.bytes, newlen);
     if (!ctx->inbuf.bytes)
