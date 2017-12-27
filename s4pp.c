@@ -8,8 +8,6 @@
 #define return_res     st(return ctx->err == S4PP_OK && !ctx->fatal;)
 #define return_err(x)  st(ctx->err = x; return false;)
 
-#define SUPPORTED_VER_0_9 "0.9"
-#define SUPPORTED_VER_1_0 "1.0"
 #define MAX_PROTOCOL_ERRORS_BEFORE_FATAL 5
 #define UPPER_PAYLOAD_SIZE 1400 // to be further reduced by io.max_payload
 
@@ -363,7 +361,6 @@ static bool handle_hello (s4pp_ctx_t *ctx, char *line)
   if (!sp)
     return false;
   *sp++ = 0;
-  char *ver = line + 5;
   line = sp;
   sp = strchr (line, ' ');
   if (!sp)
@@ -371,9 +368,6 @@ static bool handle_hello (s4pp_ctx_t *ctx, char *line)
   *sp++ = 0;
   char *algos = line;
   char *max_samples = sp;
-  if (strcmp (ver, SUPPORTED_VER_0_9) != 0 &&
-      strcmp (ver, SUPPORTED_VER_1_0) != 0)
-    return false;
 
   ctx->digest.mech = NULL;
   for (const digest_mech_info_t *m = ctx->digests; m->name; ++m)
