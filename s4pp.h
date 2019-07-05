@@ -123,6 +123,8 @@ typedef void (*s4pp_rnd_fn)(uint8_t *out, size_t len);
  *   @c hide_mode is S4PP_HIDE_DISABLED, this parameter may be given as NULL.
  *   This array will be referenced for the lifetime of the context.
  * @param rnd_fn The random source function.
+ * @param auth Authentication materials. May be referenced for the lifetime
+ *   of the context.
  * @param server Remote address information which will be given (possibly
  *   repeatedly) to io.connect().
  * @param hide_mode Whether to hide uploaded data behind basic encryption.
@@ -130,9 +132,10 @@ typedef void (*s4pp_rnd_fn)(uint8_t *out, size_t len);
  *   Data format 0 only allows single values, data format 1 allows multiple
  *   values, but those must be provided in S4PP_FORMATTED format in the
  *   sample struct.
+ * @param user_arg A user-provided callback argument.
  * @returns a new S4PP context, or null if one could not be allocated.
  */
-s4pp_ctx_t *s4pp_create (const s4pp_io_t *io, const digest_mech_info_t *digests, const crypto_mech_info_t *cryptos, s4pp_rnd_fn rnd_fn, const s4pp_auth_t *auth, const s4pp_server_t *server, s4pp_hide_mode_t hide_mode, int data_format);
+s4pp_ctx_t *s4pp_create (const s4pp_io_t *io, const digest_mech_info_t *digests, const crypto_mech_info_t *cryptos, s4pp_rnd_fn rnd_fn, const s4pp_auth_t *auth, const s4pp_server_t *server, s4pp_hide_mode_t hide_mode, int data_format, void *user_arg);
 
 /**
  * To be called when new data has arrived on the associated connection.
@@ -253,5 +256,11 @@ typedef enum
  * @returns the last error.
  */
 s4pp_error_t s4pp_last_error (s4pp_ctx_t *ctx);
+
+/**
+ * Retrieves the user argument that was given to @c s4pp_create().
+ * @returns The user argument for the context.
+ */
+void *s4pp_user_arg(s4pp_ctx_t *ctx);
 
 #endif

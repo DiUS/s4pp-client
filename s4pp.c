@@ -61,6 +61,7 @@ typedef struct s4pp_ctx
 
   s4pp_rnd_fn random;
   int data_format;
+  void *user_arg;
 
   s4pp_conn_t *conn;
 
@@ -404,7 +405,7 @@ static void prepare_sample_entry (s4pp_ctx_t *ctx, const s4pp_sample_t *sample, 
 }
 
 
-s4pp_ctx_t *s4pp_create (const s4pp_io_t *io, const digest_mech_info_t *digests, const crypto_mech_info_t *cryptos, s4pp_rnd_fn rnd_fn, const s4pp_auth_t *auth, const s4pp_server_t *server, s4pp_hide_mode_t hide_mode, int data_format)
+s4pp_ctx_t *s4pp_create (const s4pp_io_t *io, const digest_mech_info_t *digests, const crypto_mech_info_t *cryptos, s4pp_rnd_fn rnd_fn, const s4pp_auth_t *auth, const s4pp_server_t *server, s4pp_hide_mode_t hide_mode, int data_format, void *user_arg)
 {
   if (data_format != 0 && data_format != 1)
     return NULL;
@@ -420,6 +421,7 @@ s4pp_ctx_t *s4pp_create (const s4pp_io_t *io, const digest_mech_info_t *digests,
     ctx->server = server;
     ctx->hide_mode = hide_mode;
     ctx->data_format = data_format;
+    ctx->user_arg = user_arg;
   }
   return ctx;
 }
@@ -939,4 +941,10 @@ void s4pp_set_notification_handler (s4pp_ctx_t *ctx, s4pp_ntfy_fn fn)
   if (!ctx)
     return;
   ctx->ntfy = fn;
+}
+
+
+void *s4pp_user_arg(s4pp_ctx_t *ctx)
+{
+  return ctx->user_arg;
 }

@@ -568,7 +568,7 @@ int main (int argc, char *argv[])
 
 fresh_start:
   errored = false;
-  ctx = s4pp_create (&ios, crypto_all_mechs (), cryptos, rnd, &auth, &server, S4PP_HIDE_DISABLED + hide_opt, data_format);
+  ctx = s4pp_create (&ios, crypto_all_mechs (), cryptos, rnd, &auth, &server, S4PP_HIDE_DISABLED + hide_opt, data_format, NULL);
   if (!ctx)
   {
     warn ("failed to create s4pp context, exiting");
