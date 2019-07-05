@@ -932,6 +932,8 @@ void s4pp_destroy (s4pp_ctx_t *ctx)
     free (ctx->outbuf.overflow);
   if (ctx->digest.ctx)
     free (ctx->digest.ctx);
+  if (ctx->hide.ctx)
+    free (ctx->hide.ctx);
   free (ctx);
 }
 

@@ -231,11 +231,15 @@ static void process_inbuf (void)
     sample_list_t *sl = calloc (1, sizeof (sample_list_t));
     if (!sl)
       out_of_mem ();
+    static char *last_name = 0;
+    static char *last_val = 0;
+    free(last_name);
+    free(last_val);
     sl->line = line; // now with a few \0 in it
     sl->sample.timestamp = strtoul (t, NULL, 0);
     sl->sample.span = strtoul (span, NULL, 0);
-    sl->sample.name = strdup (name);
-    sl->sample.val.formatted = strdup (val);
+    sl->sample.name = last_name = strdup (name);
+    sl->sample.val.formatted = last_val = strdup (val);
     sl->sample.type = S4PP_FORMATTED;
     *sample_next = sl;
     sample_next = &sl->next;
