@@ -1,8 +1,42 @@
+/*
+ * Copyright 2015-2019 Dius Computing Pty Ltd. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * - Redistributions of source code must retain the above copyright
+ *   notice, this list of conditions and the following disclaimer.
+ * - Redistributions in binary form must reproduce the above copyright
+ *   notice, this list of conditions and the following disclaimer in the
+ *   documentation and/or other materials provided with the
+ *   distribution.
+ * - Neither the name of the copyright holders nor the names of
+ *   its contributors may be used to endorse or promote products derived
+ *   from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL
+ * THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+ * OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * @author Johny Mattsson <jmattsson@dius.com.au>
+ */
 #include "s4pp.h"
+#include "tiny-AES-c/aes.h"
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <poll.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -12,14 +46,16 @@
 #include <fcntl.h>
 #include <time.h>
 #include <syslog.h>
-
 #include <stdio.h>
+#include <assert.h>
 
 #define info(x...) do { if (verbose) fprintf(stderr,x); } while (0)
 #define warn(x...) do { info(x); syslog(LOG_WARNING, x); } while (0)
 
 #define SAMPLE_THRESHOLD_HI 5000
 #define SAMPLE_THRESHOLD_LO 2000
+
+static int data_format = 0;
 
 struct s4pp_server
 {
@@ -181,11 +217,15 @@ static void process_inbuf (void)
   while ((line = get_line ()))
   {
     char *t = strtok (line, ",");
+    const char *span = (data_format == 1) ? strtok (NULL, ",") : "0";
     char *name = strtok (NULL, ",");
-    char *val = strtok (NULL, ",");
+    char *val = strtok (NULL, "");
     if (!t || !name || !val)
     {
-      warn ("Bad sample format: %s,%s,%s\n", t, name, val);
+      if (data_format == 0)
+        warn ("Bad sample format: %s,%s,%s\n", t, name, val);
+      else
+        warn ("Bad sample format: %s,%s,%s,%s\n", t, span, name, val);
       continue;
     }
     sample_list_t *sl = calloc (1, sizeof (sample_list_t));
@@ -193,6 +233,7 @@ static void process_inbuf (void)
       out_of_mem ();
     sl->line = line; // now with a few \0 in it
     sl->sample.timestamp = strtoul (t, NULL, 0);
+    sl->sample.span = strtoul (span, NULL, 0);
     sl->sample.name = strdup (name);
     sl->sample.val.formatted = strdup (val);
     sl->sample.type = S4PP_FORMATTED;
@@ -406,10 +447,67 @@ static void on_notify (s4pp_ctx_t *ctx, unsigned code, unsigned nargs, const cha
 }
 
 
+static void rnd (uint8_t *out, size_t len)
+{
+  for (size_t n = 0; n < len; )
+  {
+    int ret = getrandom (out + n, len - n, 0);
+    if (ret > 0)
+      n += ret;
+    else if (ret < 0 && errno != EINTR)
+    {
+      perror ("unable to generate random bytes");
+      abort ();
+    }
+  }
+}
+
+// Wrappers for tiny-AES-c
+void aes128_init (void *ctx) {
+  memset (ctx, 0, sizeof (struct AES_ctx));
+}
+
+void aes128_setkey (void *ctx, const void *key, size_t keylen)
+{
+  assert(keylen == 16);
+  AES_init_ctx ((struct AES_ctx *)ctx, (const uint8_t *)key);
+}
+
+void aes128_run (void *ctx, const void *in, void *out, size_t len, bool dir_is_encrypt)
+{
+  struct AES_ctx *aes = (struct AES_ctx *)ctx;
+  if (out != in)
+    memcpy (out, in, len);
+  if (dir_is_encrypt)
+    AES_CBC_encrypt_buffer (aes, out, len);
+  else
+    AES_CBC_decrypt_buffer (aes, out, len);
+}
+
+void aes128_destroy (void *ctx)
+{
+  (void)ctx;
+}
+
+
+static crypto_mech_info_t cryptos[] = {
+  {
+    .name       = "AES-128-CBC",
+    .init       = aes128_init,
+    .setkey     = aes128_setkey,
+    .run        = aes128_run,
+    .destroy    = aes128_destroy,
+    .ctx_size   = sizeof (struct AES_ctx),
+    .block_size = 16
+  },
+  { .name = NULL, }
+};
+
+
 static int syntax (const char *pname)
 {
   fprintf (stderr,
-    "Syntax: %s [-h] | -u <user> -k <keyfile> -s <server> [-p <port>] [-i <upload_interval>] [-v]\n",
+    "Syntax: %s [-h] | -u <user> -k <keyfile> -s <server> [-p <port>] [-i <upload_interval>] [-v] [-H] [-H] [-F 0/1]\n",
     pname);
   return 2;
 }
@@ -433,9 +531,10 @@ int main (int argc, char *argv[])
   s4pp_io_t ios = { do_conn, do_disconn, do_send, 1400 };
   s4pp_auth_t auth = { 0, };
   s4pp_server_t server = { 0, "22226" };
+  int hide_opt = 0;
 
   int opt;
-  while ((opt = getopt (argc, argv, "u:k:s:p:i:vh")) != -1)
+  while ((opt = getopt (argc, argv, "u:k:s:p:i:vhHF:")) != -1)
   {
     switch (opt)
     {
@@ -455,6 +554,8 @@ int main (int argc, char *argv[])
         next_commit = time(NULL) + commit_interval;
         break;
       case 'v': verbose = true; break;
+      case 'H': ++hide_opt; break;
+      case 'F': data_format = atoi (optarg); break;
       default:
         verbose = true;
         info ("Unknown option '%c'\n", opt);
@@ -467,7 +568,7 @@ int main (int argc, char *argv[])
 
 fresh_start:
   errored = false;
-  ctx = s4pp_create (&ios, crypto_all_mechs (), &auth, &server);
+  ctx = s4pp_create (&ios, crypto_all_mechs (), cryptos, rnd, &auth, &server, S4PP_HIDE_DISABLED + hide_opt, data_format);
   if (!ctx)
   {
     warn ("failed to create s4pp context, exiting");

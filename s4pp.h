@@ -1,9 +1,42 @@
+/*
+ * Copyright 2015-2019 Dius Computing Pty Ltd. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * - Redistributions of source code must retain the above copyright
+ *   notice, this list of conditions and the following disclaimer.
+ * - Redistributions in binary form must reproduce the above copyright
+ *   notice, this list of conditions and the following disclaimer in the
+ *   documentation and/or other materials provided with the
+ *   distribution.
+ * - Neither the name of the copyright holders nor the names of
+ *   its contributors may be used to endorse or promote products derived
+ *   from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL
+ * THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+ * OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * @author Johny Mattsson <jmattsson@dius.com.au>
+ */
 #ifndef _S4PP_H_
 #define _S4PP_H_
 
 #include <stdint.h>
 #include <stdbool.h>
 #include "digests.h"
+#include "crypto.h"
 
 typedef struct s4pp_ctx s4pp_ctx_t; // opaque to all but s4pp.c
 typedef struct s4pp_conn s4pp_conn_t; // opaque from s4pp's point of view
@@ -59,17 +92,47 @@ typedef struct s4pp_auth
 } s4pp_auth_t;
 
 /**
+ * Hide mode setting, for controlling whether uploaded data is encrypted.
+ * If disabled, encryption is not used even if the server supports it.
+ * If preferred, encryption will be used provided the server supports it.
+ * If mandatory, encryption will always be used, and the connection will
+ * fail if the server does not support the hide feature.
+ */
+typedef enum {
+  S4PP_HIDE_DISABLED, S4PP_HIDE_PREFERRED, S4PP_HIDE_MANDATORY
+} s4pp_hide_mode_t;
+
+/**
+ * A function capable of generating strong random numbers.
+ * @param out The destination buffer
+ * @param len The number of of random bytes to write into the buffer.
+ */
+typedef void (*s4pp_rnd_fn)(uint8_t *out, size_t len);
+
+/**
  * Create a new S4PP context.
  * @param io The I/O functions to use. See @c s4pp_io for details.
  * @param digests An array of available digest mechanisms, including at least
  *   SHA256. Array is terminated by a null record (digests[n].name == NULL).
  *   The array should be sorted in preference order, with the most desirable
- *   mechanism first.
+ *   mechanism first. This array will be referenced for the lifetime of the
+ *   context.
+ * @param cryptos An array of available crypto mechanisms. Array is terminated
+ *   by a null record (crypto[n].name == NULL). The array should be sorted
+ *   in preference order, with the most desirable mechanism first. If the
+ *   @c hide_mode is S4PP_HIDE_DISABLED, this parameter may be given as NULL.
+ *   This array will be referenced for the lifetime of the context.
+ * @param rnd_fn The random source function.
  * @param server Remote address information which will be given (possibly
  *   repeatedly) to io.connect().
+ * @param hide_mode Whether to hide uploaded data behind basic encryption.
+ * @param data_format Which data format to claim when commencing uploads.
+ *   Data format 0 only allows single values, data format 1 allows multiple
+ *   values, but those must be provided in S4PP_FORMATTED format in the
+ *   sample struct.
  * @returns a new S4PP context, or null if one could not be allocated.
  */
-s4pp_ctx_t *s4pp_create (const s4pp_io_t *io, const digest_mech_info_t *digests, const s4pp_auth_t *auth, const s4pp_server_t *server);
+s4pp_ctx_t *s4pp_create (const s4pp_io_t *io, const digest_mech_info_t *digests, const crypto_mech_info_t *cryptos, s4pp_rnd_fn rnd_fn, const s4pp_auth_t *auth, const s4pp_server_t *server, s4pp_hide_mode_t hide_mode, int data_format);
 
 /**
  * To be called when new data has arrived on the associated connection.
@@ -101,6 +164,7 @@ typedef struct s4pp_sample
 {
   const char *name;
   time_t timestamp;
+  unsigned span;
   union {
     const char *formatted;
     double numeric;

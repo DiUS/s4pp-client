@@ -1,4 +1,4 @@
-CFLAGS=-std=c99 -Wall -Wextra -O2 -g -D_POSIX_SOURCE -D_POSIX_C_SOURCE=200809L
+CFLAGS=-std=c99 -Wall -Wextra -O2 -g -D_POSIX_SOURCE -D_POSIX_C_SOURCE=200809L -DECB=0 -DCTR=0
 LDFLAGS=
 
 SRCS=\
@@ -6,6 +6,7 @@ SRCS=\
 	digests.c \
 	main.c \
 	sha2.c \
+	tiny-AES-c/aes.c \
 
 sha2.o: CFLAGS+=-fno-strict-aliasing
 
@@ -17,4 +18,4 @@ s4ppc: $(OBJS)
 
 .PHONY: clean
 clean:
-	-rm -f s4ppc *.o
+	-rm -f s4ppc *.o tiny-AES-c/aes.o
