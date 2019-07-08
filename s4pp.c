@@ -84,6 +84,7 @@ typedef struct s4pp_ctx
 
   bool waiting_for_sent;
   bool want_commit_on_sent;
+  unsigned num_items;
 
   struct
   {
@@ -109,6 +110,7 @@ typedef struct s4pp_ctx
   s4pp_next_fn next;
   s4pp_done_fn done;
   s4pp_ntfy_fn ntfy;
+  s4pp_on_commit_fn commit;
 
   enum {
     S4PP_INIT,
@@ -184,15 +186,27 @@ static void clear_dict (s4pp_ctx_t *ctx)
 }
 
 
-static void invoke_done (s4pp_ctx_t *ctx, bool success)
+static void invoke_done (s4pp_ctx_t *ctx)
 {
+  ctx->next = NULL;
+
   s4pp_done_fn done = ctx->done;
-  if (!success)
-    ctx->next = NULL; // failed, stop pulling samples
-  if (!ctx->next)
-    ctx->done = NULL; // final commit
+  ctx->done = NULL;
   if (done)
-    done (ctx, success);
+    done (ctx);
+}
+
+
+static void invoke_committed(s4pp_ctx_t *ctx, bool result)
+{
+  if (!result)
+    invoke_done (ctx);
+
+  unsigned num_items = ctx->num_items;
+  ctx->num_items = 0;
+
+  if (ctx->commit)
+    ctx->commit (ctx, result, num_items);
 }
 
 
@@ -288,7 +302,7 @@ static bool process_out_buffer (s4pp_ctx_t *ctx, bool flush)
     if (ctx->conn)
       ctx->io->disconnect (ctx->conn);
     ctx->conn = NULL;
-    invoke_done (ctx, false);
+    invoke_committed (ctx, false);
   }
   return false;
 }
@@ -659,7 +673,7 @@ static bool handle_line (s4pp_ctx_t *ctx, char *line, uint16_t len)
       goto protocol_error;
     // we don't pipeline sequences, so don't need to check the seqno
     ctx->state = S4PP_AUTHED;
-    invoke_done (ctx, false);
+    invoke_committed (ctx, false);
   }
   else if (strncmp ("OK:", line, 3) == 0)
   {
@@ -667,7 +681,7 @@ static bool handle_line (s4pp_ctx_t *ctx, char *line, uint16_t len)
       goto protocol_error;
     ctx->proto_errs = 0;
     ctx->state = S4PP_AUTHED;
-    invoke_done (ctx, true);
+    invoke_committed (ctx, true);
   }
   else if (strncmp ("NTFY:", line, 5) == 0)
   {
@@ -690,7 +704,8 @@ static bool handle_line (s4pp_ctx_t *ctx, char *line, uint16_t len)
         }
       }
       args[i] = 0; // Be nice and leave a null at the end of args array
-      ctx->ntfy (ctx, (unsigned)code, nargs, args);
+      if (ctx->ntfy)
+        ctx->ntfy (ctx, (unsigned)code, nargs, args);
       free (args);
     }
     // else silently ignore it? or whinge somehow? TODO
@@ -709,7 +724,7 @@ protocol_error:
     ctx->fatal = true; // "escape hatch" to avoid reconnect hammering
   else
     ++ctx->proto_errs;
-  invoke_done (ctx, false);
+  invoke_committed (ctx, false);
   return_res;
 }
 
@@ -726,7 +741,7 @@ bool s4pp_on_recv (s4pp_ctx_t *ctx, char *data, uint16_t len)
     if (ctx->state == S4PP_BUFFERING || ctx->state == S4PP_COMMITTING)
     {
       ctx->err = S4PP_SEQUENCE_NOT_COMMITTED;
-      invoke_done (ctx, false);
+      invoke_committed (ctx, false);
       return_res;
     }
     else
@@ -825,14 +840,12 @@ static void progress_work (s4pp_ctx_t *ctx)
             if (!prepare_dict_entry (ctx, sample.name, &idx))
               break;
             prepare_sample_entry (ctx, &sample, idx);
+            ++ctx->num_items;
           }
           else
           {
-            ctx->next = NULL; // mark end of this batch
-            if (ctx->done)
-              sig = true;
-            else
-              break;
+            invoke_done(ctx);
+            break;
           }
         }
         if (sig)
@@ -893,13 +906,12 @@ bool s4pp_pull (s4pp_ctx_t *ctx, s4pp_next_fn next, s4pp_done_fn done)
 }
 
 
-void s4pp_flush (s4pp_ctx_t *ctx, s4pp_done_fn done)
+void s4pp_flush (s4pp_ctx_t *ctx)
 {
   if (ctx->state != S4PP_BUFFERING)
-    done (ctx, true);
+    invoke_committed (ctx, true);
   else
   {
-    ctx->done = done;
     if (ctx->waiting_for_sent)
       ctx->want_commit_on_sent = true;
     else
@@ -943,6 +955,14 @@ void s4pp_set_notification_handler (s4pp_ctx_t *ctx, s4pp_ntfy_fn fn)
   if (!ctx)
     return;
   ctx->ntfy = fn;
+}
+
+
+void s4pp_set_commit_handler (s4pp_ctx_t *ctx, s4pp_on_commit_fn fn)
+{
+  if (!ctx)
+    return;
+  ctx->commit = fn;
 }
 
 

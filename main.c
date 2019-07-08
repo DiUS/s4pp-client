@@ -103,6 +103,8 @@ static sample_list_t *last_pulled_sample;
 static unsigned sample_count;
 
 static bool verbose;
+static bool no_notify;
+
 static int commit_interval = 30;
 static time_t next_commit;
 
@@ -168,32 +170,31 @@ static char *get_line (void)
 }
 
 
-static void on_checkpoint (s4pp_ctx_t *ctx, bool success)
+static void on_checkpoint (s4pp_ctx_t *ctx, bool success, unsigned num_items)
 {
   (void)ctx;
   if (success)
   {
-    unsigned count = 0;
     while (samples != last_pulled_sample)
     {
       sample_list_t *sl = samples->next;
       free (samples->line);
       free (samples);
       samples = sl;
-      ++count;
     }
     if (last_pulled_sample)
     {
       samples = last_pulled_sample->next;
       free (last_pulled_sample->line);
       free (last_pulled_sample);
-      ++count;
     }
-    sample_count -= count;
+    sample_count -= num_items;
     if (!sample_count)
       last_sample = NULL;
-    info ("Committed %u samples (%u still queued)\n", count, sample_count);
+    info ("Committed %u samples (%u still queued)\n", num_items, sample_count);
   }
+  else
+    info ("Commit failed: code %d\n", s4pp_last_error (ctx));
   last_pulled_sample = NULL;
 }
 
@@ -251,13 +252,18 @@ static void process_inbuf (void)
 }
 
 
+static void flush_on_pull_done(s4pp_ctx_t *ctx)
+{
+  s4pp_flush (ctx);
+}
+
 static void handle_poll_timeout (void)
 {
   next_commit = time (NULL) + commit_interval;
 
   if (samples)
   {
-    if (!s4pp_pull (ctx, next_sample, on_checkpoint))
+    if (!s4pp_pull (ctx, next_sample, flush_on_pull_done))
     {
       if (s4pp_last_error (ctx) != S4PP_ALREADY_BUSY)
         errored = true;
@@ -268,6 +274,7 @@ static void handle_poll_timeout (void)
       info ("Uploading %u+ samples...\n", sample_count);
   }
 }
+
 
 
 static void handle_sample_input (void)
@@ -538,7 +545,7 @@ int main (int argc, char *argv[])
   int hide_opt = 0;
 
   int opt;
-  while ((opt = getopt (argc, argv, "u:k:s:p:i:vhHF:")) != -1)
+  while ((opt = getopt (argc, argv, "u:k:s:p:i:vnhHF:")) != -1)
   {
     switch (opt)
     {
@@ -558,6 +565,7 @@ int main (int argc, char *argv[])
         next_commit = time(NULL) + commit_interval;
         break;
       case 'v': verbose = true; break;
+      case 'n': no_notify = true; break;
       case 'H': ++hide_opt; break;
       case 'F': data_format = atoi (optarg); break;
       default:
@@ -578,7 +586,9 @@ fresh_start:
     warn ("failed to create s4pp context, exiting");
     return 1;
   }
-  s4pp_set_notification_handler (ctx, on_notify);
+  if (!no_notify)
+    s4pp_set_notification_handler (ctx, on_notify);
+  s4pp_set_commit_handler (ctx, on_checkpoint);
 
   while (!terminate && !errored)
   {

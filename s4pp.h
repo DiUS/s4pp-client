@@ -180,9 +180,8 @@ typedef struct s4pp_sample
 /**
  * Callback prototype for signalling a commit result.
  * @param ctx The s4pp context.
- * @param success True if the commit was successful, false otherwise.
  */
-typedef void (*s4pp_done_fn) (s4pp_ctx_t *ctx, bool success);
+typedef void (*s4pp_done_fn) (s4pp_ctx_t *ctx);
 
 /**
  * Callback prototype for pulling the next sample to send.
@@ -194,24 +193,21 @@ typedef bool (*s4pp_next_fn) (s4pp_ctx_t *ctx, s4pp_sample_t *sample);
 
 /**
  * Commences an upload where each sample will be "pulled" via the next()
- * callback. If done is non-NULL, the current sequence will be committed on
- * reaching the end of samples (when next() returns false).
+ * callback.
  * @param ctx The s4pp context.
  * @param next The sample source function.
- * @param done The commit function. NULL if not wanting to force commit.
+ * @param done The function to be invoked when the pull has completed,
+ *   and a new @c s4pp_pull can be invoked. May be NULL.
  * @returns true if the pull operation could be commenced.
  */
 bool s4pp_pull (s4pp_ctx_t *ctx, s4pp_next_fn next, s4pp_done_fn done);
 
 /**
- * Requests an explicit commit of the current sequence (if any), overriding
- * any pending commit/done function registered.
+ * Requests an explicit commit of the current sequence (if any).
+ * The commit handler callback will be invoked when a response is available.
  * @param ctx The s4pp context.
- * @param done The callback to invoke when the commit result is available.
- *   If no sequence was open when s4pp_flush() is called, this callback is
- *   invoked right away with a success indication.
  */
-void s4pp_flush (s4pp_ctx_t *ctx, s4pp_done_fn done);
+void s4pp_flush (s4pp_ctx_t *ctx);
 
 /**
  * Destroys an s4pp context and frees all associated resources.
@@ -238,6 +234,28 @@ typedef void (*s4pp_ntfy_fn) (s4pp_ctx_t *ctx, unsigned code, unsigned nargs, co
  * @param fn The handler function, or NULL to deregister.
  */
 void s4pp_set_notification_handler (s4pp_ctx_t *ctx, s4pp_ntfy_fn fn);
+
+/**
+ * Callback function for when a commit response has been received.
+ * @param ctx The s4pp context that committed items.
+ * @param result Whether the commit was successful or not.
+ * @param num_committed The number of items that were included in the commit
+ *   attempt. If @c result is true, this many items were successfully
+ *   committed, otherwise this is the number of items that failed to
+ *   get committed (and thus may have been lost, unless the caller has
+ *   kept them).
+ */
+typedef void (*s4pp_on_commit_fn)(s4pp_ctx_t *ctx, bool result, unsigned num_committed);
+
+/**
+ * Set the function to be called back whenever items have been committed,
+ * or have failed to be committed. Unexpected errors during the session
+ * will bubble through as failed commits. Use @c s4pp_last_error for
+ * additional detail.
+ * @param ctx The s4pp context.
+ * @param fn The handler function, or NULL to deregister.
+ */
+void s4pp_set_commit_handler (s4pp_ctx_t *ctx, s4pp_on_commit_fn fn);
 
 typedef enum
 {
