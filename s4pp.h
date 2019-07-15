@@ -173,6 +173,7 @@ typedef struct s4pp_sample
     double numeric;
   } val;
   enum { S4PP_FORMATTED, S4PP_NUMERIC } type;
+  uint32_t divisor; // MUST NOT change for 'name' within a sequence!
 } s4pp_sample_t;
 
 

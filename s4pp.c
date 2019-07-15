@@ -350,7 +350,7 @@ static bool prepare_begin_seq (s4pp_ctx_t *ctx)
 }
 
 
-static bool prepare_dict_entry (s4pp_ctx_t *ctx, const char *name, unsigned *idx)
+static bool prepare_dict_entry (s4pp_ctx_t *ctx, const char *name, unsigned divisor, unsigned *idx)
 {
   for (dict_entry_t *d = ctx->seq.dict; d; d = d->next)
   {
@@ -379,7 +379,7 @@ static bool prepare_dict_entry (s4pp_ctx_t *ctx, const char *name, unsigned *idx
   if (!outbuf)
     return false;
   unsigned overreach =
-    max_buf_len - sprintf (outbuf, "DICT:%u,,1,%s\n", d->idx, name);
+    max_buf_len - sprintf (outbuf, "DICT:%u,,%u,%s\n", d->idx, divisor, name);
   return_buffer (ctx, overreach);
 
   update_hmac (ctx, outbuf, max_buf_len - overreach);
@@ -837,7 +837,7 @@ static void progress_work (s4pp_ctx_t *ctx)
           if (ctx->next (ctx, &sample))
           {
             unsigned idx;
-            if (!prepare_dict_entry (ctx, sample.name, &idx))
+            if (!prepare_dict_entry (ctx, sample.name, sample.divisor, &idx))
               break;
             prepare_sample_entry (ctx, &sample, idx);
             ++ctx->num_items;

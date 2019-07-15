@@ -242,6 +242,7 @@ static void process_inbuf (void)
     sl->sample.name = last_name = strdup (name);
     sl->sample.val.formatted = last_val = strdup (val);
     sl->sample.type = S4PP_FORMATTED;
+    sl->sample.divisor = 1;
     *sample_next = sl;
     sample_next = &sl->next;
     last_sample = sl;
