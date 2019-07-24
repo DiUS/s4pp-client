@@ -232,15 +232,11 @@ static void process_inbuf (void)
     sample_list_t *sl = calloc (1, sizeof (sample_list_t));
     if (!sl)
       out_of_mem ();
-    static char *last_name = 0;
-    static char *last_val = 0;
-    free(last_name);
-    free(last_val);
     sl->line = line; // now with a few \0 in it
     sl->sample.timestamp = strtoul (t, NULL, 0);
     sl->sample.span = strtoul (span, NULL, 0);
-    sl->sample.name = last_name = strdup (name);
-    sl->sample.val.formatted = last_val = strdup (val);
+    sl->sample.name = name;
+    sl->sample.val.formatted = val;
     sl->sample.type = S4PP_FORMATTED;
     sl->sample.divisor = 1;
     *sample_next = sl;
@@ -633,5 +629,6 @@ fresh_start:
 
   s4pp_destroy (ctx);
   info ("Done.\n");
+  free(inbuf.bytes); // to assist valgrinding
   return 0;
 }
