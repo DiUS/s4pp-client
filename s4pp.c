@@ -104,6 +104,7 @@ typedef struct s4pp_ctx
   struct {
     const crypto_mech_info_t *mech;
     void *ctx;
+    char *from;
   } hide;
   s4pp_hide_mode_t hide_mode;
 
@@ -210,6 +211,30 @@ static void invoke_committed(s4pp_ctx_t *ctx, bool result)
 }
 
 
+static void hide_pad(s4pp_ctx_t *ctx)
+{
+  if (!ctx->hide.mech)
+    return;
+
+  uint16_t skip =
+    (ctx->hide.from > ctx->outbuf.bytes &&
+     ctx->hide.from < ctx->outbuf.bytes + ctx->outbuf.used) ?
+    ctx->hide.from - ctx->outbuf.bytes : 0;
+
+  // Pad to a full block if necessary (we know the size of the output
+  // buffers is a multiple of the blocksize, so we won't overrun here).
+  uint16_t used_in = ctx->outbuf.used;
+  while ((ctx->outbuf.used - skip) % ctx->hide.mech->block_size)
+    ctx->outbuf.bytes[ctx->outbuf.used++] = '\n';
+
+  uint16_t padlen = ctx->outbuf.used - used_in;
+  // This is the critical part - we need to hmac the padding before
+  // the returned line buffer gets filled and its content hmac'd.
+  if (ctx->state == S4PP_BUFFERING && padlen > 0)
+    update_hmac (ctx, ctx->outbuf.bytes + used_in, padlen);
+}
+
+
 static char *get_line_buffer (s4pp_ctx_t *ctx, unsigned len)
 {
   if (!ctx->outbuf.bytes)
@@ -241,6 +266,9 @@ static char *get_line_buffer (s4pp_ctx_t *ctx, unsigned len)
   char *buf = ctx->outbuf.bytes + ctx->outbuf.used;
   if (ctx->outbuf.overflow_used || len > avail)
   {
+    if (ctx->hide.mech && !ctx->outbuf.overflow_used)
+      hide_pad (ctx);
+
     buf = ctx->outbuf.overflow + ctx->outbuf.overflow_used;
     ctx->outbuf.overflow_used += len;
   }
@@ -275,6 +303,11 @@ static bool process_out_buffer (s4pp_ctx_t *ctx, bool flush)
       !flush)
     return true;
 
+  // Much of the time the padding has already been done in the overflow
+  // handling, but post-SIG padding needs get caught here
+  if (ctx->hide.mech)
+    hide_pad (ctx);
+
   // Swap outbuf & overflow, *before* we get on_sent callback
   uint16_t used = ctx->outbuf.used;
   char *data = ctx->outbuf.bytes;
@@ -286,13 +319,13 @@ static bool process_out_buffer (s4pp_ctx_t *ctx, bool flush)
 
   if (ctx->hide.mech)
   {
-    // Pad to a full block if necessary (we know the size of the output buffers
-    // is a multiple of the blocksize, so we won't overrun here).
-    while (used % ctx->hide.mech->block_size)
-      data[used++] = '\n';
+    char *to_encrypt = ctx->hide.from > data && ctx->hide.from < (data + used) ?
+      ctx->hide.from : data;
 
-    ctx->hide.mech->run(ctx->hide.ctx, data, data, used, true);
-  }
+    ctx->hide.mech->run (
+      ctx->hide.ctx, to_encrypt, to_encrypt, used - (to_encrypt - data), true);
+    ctx->hide.from = 0;
+}
 
   if (!ctx->io->send (ctx->conn, data, used))
   {
@@ -639,6 +672,10 @@ static void handle_auth (s4pp_ctx_t *ctx, char *token, uint16_t len)
     char *line = get_line_buffer (ctx, n);
     if (line)
     {
+      // Since we do an explicit send above we could probably do without
+      // support for skipping encryption of the first part of the buffer,
+      // but it's already written, so...
+      ctx->hide.from = line;
       memcpy (line, buf, n);
       update_hmac (ctx, line, n);
     }
