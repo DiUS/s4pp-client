@@ -343,8 +343,6 @@ static bool process_out_buffer (s4pp_ctx_t *ctx, bool flush)
 
 static void send_commit (s4pp_ctx_t *ctx)
 {
-  printf("COMMIT: (%d of %d)\n",ctx->seq.n_sent,ctx->seq.n_max);
-
   unsigned digest_len = ctx->digest.mech->digest_size;
   char *outbuf = get_line_buffer (ctx, 4 + digest_len * 2 + 1); // SIG:digest\n
   if (!outbuf)
@@ -877,12 +875,8 @@ static void progress_work (s4pp_ctx_t *ctx)
           {
             if (sample.type==S4PP_RESERVATION)
             {
-              printf("RESERVATION: %d (%d of %d)\n",sample.val.reservation,ctx->seq.n_sent,ctx->seq.n_max);
               if (ctx->seq.n_sent+sample.val.reservation >= ctx->seq.n_max)
-              {
-                printf("RESERVATION: Early exit\n");
                 sig = true;
-              }
             }
             else
             {
