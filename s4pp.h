@@ -162,6 +162,8 @@ bool s4pp_on_sent (s4pp_ctx_t *ctx);
  * Each sample to be transmitted is described by the sensor name, a timestamp
  * and the value itself. The value may be a preformatted string or a regular
  * double value. The type enum determines which is being used.
+ * A type of S4PP_RESERVATION is used to pre-announce a block of entries which
+ * need to stay in one transaction. The number of entries is given in "reservation"
  */
 typedef struct s4pp_sample
 {
@@ -171,8 +173,9 @@ typedef struct s4pp_sample
   union {
     const char *formatted;
     double numeric;
+    int    reservation;
   } val;
-  enum { S4PP_FORMATTED, S4PP_NUMERIC } type;
+  enum { S4PP_FORMATTED, S4PP_NUMERIC, S4PP_RESERVATION } type;
   uint32_t divisor; // MUST NOT change for 'name' within a sequence!
 } s4pp_sample_t;
 
