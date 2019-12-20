@@ -128,6 +128,7 @@ typedef struct s4pp_ctx
   unsigned proto_errs;
 } s4pp_ctx_t;
 
+static void progress_work (s4pp_ctx_t *ctx);
 
 static void do_hmac_pad (s4pp_ctx_t *ctx, uint8_t padval)
 {
@@ -200,14 +201,14 @@ static void invoke_done (s4pp_ctx_t *ctx)
 
 static void invoke_committed(s4pp_ctx_t *ctx, bool result)
 {
-  if (!result)
-    invoke_done (ctx);
-
   unsigned num_items = ctx->num_items;
   ctx->num_items = 0;
 
   if (ctx->commit)
     ctx->commit (ctx, result, num_items);
+
+  if (!result)
+    invoke_done (ctx);
 }
 
 
@@ -719,6 +720,7 @@ static bool handle_line (s4pp_ctx_t *ctx, char *line, uint16_t len)
     ctx->proto_errs = 0;
     ctx->state = S4PP_AUTHED;
     invoke_committed (ctx, true);
+    progress_work(ctx);
   }
   else if (strncmp ("NTFY:", line, 5) == 0)
   {
