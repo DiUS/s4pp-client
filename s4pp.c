@@ -125,6 +125,8 @@ typedef struct s4pp_ctx
 
   s4pp_error_t err;
   bool fatal;
+  bool destroy_prohibited;
+  bool destroy_delayed;
   unsigned proto_errs;
 } s4pp_ctx_t;
 
@@ -719,8 +721,14 @@ static bool handle_line (s4pp_ctx_t *ctx, char *line, uint16_t len)
       goto protocol_error;
     ctx->proto_errs = 0;
     ctx->state = S4PP_AUTHED;
+
+    ctx->destroy_prohibited = true;
     invoke_committed (ctx, true);
-    progress_work(ctx);
+    ctx->destroy_prohibited = false;
+    if (ctx->destroy_delayed)
+      s4pp_destroy(ctx);
+    else
+      progress_work(ctx);
   }
   else if (strncmp ("NTFY:", line, 5) == 0)
   {
@@ -978,6 +986,11 @@ void s4pp_destroy (s4pp_ctx_t *ctx)
 {
   if (!ctx)
     return;
+  if (ctx->destroy_prohibited)
+  {
+    ctx->destroy_delayed=true;
+    return;
+  }
   clear_dict (ctx);
   if (ctx->conn)
     ctx->io->disconnect (ctx->conn);
