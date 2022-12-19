@@ -713,6 +713,7 @@ static bool handle_line (s4pp_ctx_t *ctx, char *line, uint16_t len)
       goto protocol_error;
     // we don't pipeline sequences, so don't need to check the seqno
     ctx->state = S4PP_AUTHED;
+    ctx->err = S4PP_SEQUENCE_NOT_COMMITTED;
     invoke_committed (ctx, false);
   }
   else if (strncmp ("OK:", line, 3) == 0)
