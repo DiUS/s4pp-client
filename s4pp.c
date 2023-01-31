@@ -435,7 +435,7 @@ static void prepare_sample_entry (s4pp_ctx_t *ctx, const s4pp_sample_t *sample, 
   char *outbuf = get_line_buffer (ctx, max_buf_len);
   if (!outbuf)
     return;
-  int32_t delta = sample->timestamp - ctx->seq.last_time;
+  int delta = sample->timestamp - ctx->seq.last_time;
   unsigned n = 0;
   switch (ctx->data_format)
   {
@@ -530,7 +530,11 @@ static bool handle_hello (s4pp_ctx_t *ctx, char *line)
   *sp++ = 0;
   if (strncmp("S4PP/1.", line, 7) != 0)
     return false;
+  // GCC 11 appears confused and complains that 7 is of char type below??
+  #pragma GCC diagnostic push
+  #pragma GCC diagnostic ignored "-Wchar-subscripts"
   bool is_v1_2plus = (strlen(line) == 8 && isdigit(line[7]) && line[7] >= '2');
+  #pragma GCC diagnostic pop
   line = sp;
   sp = strchr (line, ' ');
   if (!sp)
