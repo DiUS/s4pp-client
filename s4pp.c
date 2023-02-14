@@ -885,6 +885,9 @@ static void progress_work (s4pp_ctx_t *ctx)
           sig = true;
         else
         {
+          // If we've already "used up" our sample pull then this is a no-op
+          if (!ctx->next)
+            break;
           s4pp_sample_t sample;
           if (ctx->next (ctx, &sample))
           {
@@ -954,6 +957,9 @@ bool s4pp_on_sent (s4pp_ctx_t *ctx)
 
 bool s4pp_pull (s4pp_ctx_t *ctx, s4pp_next_fn next, s4pp_done_fn done)
 {
+  if (!next)
+    return_err(S4PP_OK);
+
   if (ctx->next || ctx->done)
   {
     progress_work (ctx);
